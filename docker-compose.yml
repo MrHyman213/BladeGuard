@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: knife-certs-db
+    environment:
+      POSTGRES_DB: knife_certs
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - knife-certs-network
+
+  app:
+    build: .
+    container_name: knife-certs-bot
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: knife_certs
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      YANDEX_DISK_TOKEN: ${YANDEX_DISK_TOKEN}
+      YANDEX_DISK_FOLDER: /certificates
+    depends_on:
+      - postgres
+    networks:
+      - knife-certs-network
+
+volumes:
+  postgres_data:
+
+networks:
+  knife-certs-network:
+    driver: bridge
