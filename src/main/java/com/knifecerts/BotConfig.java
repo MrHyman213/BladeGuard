@@ -14,10 +14,12 @@ public class BotConfig {
     private static final Logger logger = Logger.getLogger(BotConfig.class.getName());
 
     @Bean
-    public TelegramBotsApi telegramBotsApi(KnifeBot knifeBot) throws TelegramApiException {
+    public TelegramBotsApi telegramBotsApi(KnifeBot knifeBot, AdminBot adminBot) throws TelegramApiException {
         TelegramBotsApi api = new TelegramBotsApi(DefaultBotSession.class);
         api.registerBot(knifeBot);
-        logger.info("Bot registered successfully");
+        logger.info("KnifeBot registered successfully");
+        api.registerBot(adminBot);
+        logger.info("AdminBot registered successfully");
         return api;
     }
 }

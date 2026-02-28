@@ -1,19 +1,27 @@
 package com.knifecerts;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
-
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.logging.Logger;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
 public class YandexDiskService {
@@ -25,11 +33,47 @@ public class YandexDiskService {
 
     @Value("${yandex.disk.folder}")
     private String folder;
+    
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String RANDOM_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+    private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
+    
+    private String getCleanToken() {
+        return token != null ? token.trim() : null;
+    }
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /**
+     * Генерирует уникальное имя файла в формате: photo_<timestamp>_<random>.jpg
+     * 
+     * @param originalName оригинальное имя файла (не используется, но может быть полезно для расширения)
+     * @return уникальное имя файла
+     */
+    private String generateUniqueFileName(String originalName) {
+        String timestamp = LocalDateTime.now().format(TIMESTAMP_FORMATTER);
+        String randomPart = generateRandomString(6);
+        return "photo_" + timestamp + "_" + randomPart + ".jpg";
+    }
+    
+    /**
+     * Генерирует случайную строку заданной длины из символов a-z и 0-9
+     * 
+     * @param length длина строки
+     * @return случайная строка
+     */
+    private String generateRandomString(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            int index = RANDOM.nextInt(RANDOM_CHARS.length());
+            sb.append(RANDOM_CHARS.charAt(index));
+        }
+        return sb.toString();
+    }
+
     public String uploadPhoto(InputStream photoStream, String fileName) throws IOException {
+        // Проверяем и создаем папку если её нет
         ensureFolderExists();
         
         String path = folder + "/" + fileName;
@@ -53,23 +97,136 @@ public class YandexDiskService {
         }
     }
 
-    private void ensureFolderExists() {
+    /**
+     * Загружает фото в папку offers с автоматической генерацией уникального имени файла
+     * и логикой повторных попыток при ошибках.
+     * 
+     * @param photoStream поток с данными фото
+     * @param originalFileName оригинальное имя файла (используется для генерации уникального имени)
+     * @return путь к загруженному файлу на Yandex.Disk
+     * @throws IOException если загрузка не удалась после всех попыток
+     */
+    public String uploadToOffers(InputStream photoStream, String originalFileName) throws IOException {
+        String uniqueFileName = generateUniqueFileName(originalFileName);
+        String offersPath = "app:/offers/" + uniqueFileName;
+        
+        int maxRetries = 3;
+        IOException lastException = null;
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                logger.info("Попытка загрузки файла " + uniqueFileName + " (попытка " + attempt + " из " + maxRetries + ")");
+                
+                File tempFile = File.createTempFile("telegram_photo_", ".jpg");
+                try {
+                    // Сохраняем поток во временный файл
+                    try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                        byte[] buffer = new byte[8192];
+                        int bytesRead;
+                        while ((bytesRead = photoStream.read(buffer)) != -1) {
+                            fos.write(buffer, 0, bytesRead);
+                        }
+                    }
+                    
+                    // Получаем URL для загрузки
+                    String uploadUrl = getUploadUrl(offersPath);
+                    
+                    // Загружаем файл
+                    uploadFile(uploadUrl, tempFile);
+                    
+                    logger.info("Файл успешно загружен: " + offersPath);
+                    return offersPath;
+                    
+                } finally {
+                    Files.deleteIfExists(tempFile.toPath());
+                }
+                
+            } catch (IOException e) {
+                lastException = e;
+                logger.warning("Ошибка при загрузке файла (попытка " + attempt + "): " + e.getMessage());
+                
+                if (attempt < maxRetries) {
+                    try {
+                        // Экспоненциальная задержка: 1s, 2s, 4s
+                        long delayMs = (long) Math.pow(2, attempt - 1) * 1000;
+                        logger.info("Ожидание " + delayMs + "ms перед следующей попыткой");
+                        Thread.sleep(delayMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Загрузка прервана", ie);
+                    }
+                }
+            }
+        }
+        
+        // Если все попытки не удались
+        logger.severe("Не удалось загрузить файл после " + maxRetries + " попыток");
+        throw new IOException("Не удалось загрузить файл на Yandex.Disk после " + maxRetries + " попыток", lastException);
+    }
+
+    private void ensureFolderExists() throws IOException {
+        // Логируем токен для отладки (первые и последние 5 символов)
+        String cleanToken = getCleanToken();
+        if (cleanToken != null && cleanToken.length() > 10) {
+            logger.info("Token loaded: " + cleanToken.substring(0, 5) + "..." + cleanToken.substring(cleanToken.length() - 5) + " (length: " + cleanToken.length() + ")");
+        } else {
+            logger.severe("Token is null or too short: " + cleanToken);
+        }
+        logger.info("Folder path: " + folder);
+        
+        // Логируем полный заголовок Authorization
+        String authHeader = "OAuth " + cleanToken;
+        logger.info("Authorization header: " + authHeader.substring(0, Math.min(15, authHeader.length())) + "... (total length: " + authHeader.length() + ")");
+        
         try {
-            String url = UriComponentsBuilder
+            // Проверяем существование папки
+            String checkUrl = UriComponentsBuilder
                     .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
                     .queryParam("path", folder)
                     .build()
                     .toUriString();
             
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", "OAuth " + token);
+            logger.info("Request URL: " + checkUrl);
             
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Authorization", authHeader);
             HttpEntity<String> entity = new HttpEntity<>(headers);
             
-            restTemplate.exchange(url, HttpMethod.PUT, entity, String.class);
-            logger.info("Folder created: " + folder);
+            restTemplate.exchange(checkUrl, HttpMethod.GET, entity, String.class);
+            logger.info("Folder exists: " + folder);
+            
         } catch (Exception e) {
-            logger.info("Folder already exists or error: " + e.getMessage());
+            // Папка не существует, создаем её
+            if (e.getMessage() != null && e.getMessage().contains("404")) {
+                logger.info("Folder not found, creating: " + folder);
+                createFolder();
+            } else {
+                logger.warning("Error checking folder: " + e.getMessage());
+            }
+        }
+    }
+
+    private void createFolder() throws IOException {
+        String url = UriComponentsBuilder
+                .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
+                .queryParam("path", folder)
+                .build()
+                .toUriString();
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "OAuth " + getCleanToken());
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        
+        try {
+            restTemplate.exchange(url, HttpMethod.PUT, entity, String.class);
+            logger.info("Folder created successfully: " + folder);
+        } catch (Exception e) {
+            if (e.getMessage() != null && e.getMessage().contains("409")) {
+                logger.info("Folder already exists: " + folder);
+            } else {
+                logger.severe("Failed to create folder: " + e.getMessage());
+                throw new IOException("Не удалось создать папку на Яндекс.Диске", e);
+            }
         }
     }
 
@@ -82,7 +239,7 @@ public class YandexDiskService {
                 .toUriString();
         
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "OAuth " + token);
+        headers.set("Authorization", "OAuth " + getCleanToken());
         
         HttpEntity<String> entity = new HttpEntity<>(headers);
         
@@ -92,7 +249,7 @@ public class YandexDiskService {
             JsonNode jsonNode = objectMapper.readTree(response.getBody());
             return jsonNode.get("href").asText();
         } catch (Exception e) {
-            logger.severe("Failed to get upload URL. Check if OAuth token has 'cloud_api:disk.write' permission");
+            logger.severe("Failed to get upload URL: " + e.getMessage());
             throw new IOException("Ошибка доступа к Яндекс.Диску. Проверьте права токена OAuth.", e);
         }
     }
@@ -108,7 +265,6 @@ public class YandexDiskService {
         restTemplate.exchange(uploadUrl, HttpMethod.PUT, entity, String.class);
     }
 
-
     public JsonNode listPhotos() throws IOException {
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
@@ -119,7 +275,7 @@ public class YandexDiskService {
                 .toUriString();
 
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "OAuth " + token);
+        headers.set("Authorization", "OAuth " + getCleanToken());
 
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
@@ -140,7 +296,7 @@ public class YandexDiskService {
                 .toUriString();
 
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "OAuth " + token);
+        headers.set("Authorization", "OAuth " + getCleanToken());
 
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
@@ -159,8 +315,97 @@ public class YandexDiskService {
         return new java.net.URL(downloadUrl).openStream();
     }
 
+    /**
+     * Перемещает файл из одной папки в другую на Yandex.Disk
+     * 
+     * @param sourcePath исходный путь к файлу (например, "app:/offers/photo.jpg")
+     * @param destinationPath целевой путь к файлу (например, "app:/certificates/photo.jpg")
+     * @throws IOException если операция перемещения не удалась
+     */
+    public void moveFile(String sourcePath, String destinationPath) throws IOException {
+        String url = UriComponentsBuilder
+                .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources/move")
+                .queryParam("from", sourcePath)
+                .queryParam("path", destinationPath)
+                .queryParam("overwrite", "false")
+                .build()
+                .toUriString();
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "OAuth " + getCleanToken());
+        
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        
+        try {
+            restTemplate.exchange(url, HttpMethod.POST, entity, String.class);
+            logger.info("Файл успешно перемещен: " + sourcePath + " -> " + destinationPath);
+        } catch (Exception e) {
+            logger.severe("Не удалось переместить файл: " + e.getMessage());
+            throw new IOException("Ошибка перемещения файла на Yandex.Disk", e);
+        }
+    }
+
+    /**
+     * Удаляет файл с Yandex.Disk
+     * 
+     * @param filePath путь к файлу для удаления (например, "app:/offers/photo.jpg")
+     * @throws IOException если операция удаления не удалась
+     */
+    public void deleteFile(String filePath) throws IOException {
+        String url = UriComponentsBuilder
+                .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
+                .queryParam("path", filePath)
+                .queryParam("permanently", "true")
+                .build()
+                .toUriString();
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "OAuth " + getCleanToken());
+        
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        
+        try {
+            restTemplate.exchange(url, HttpMethod.DELETE, entity, String.class);
+            logger.info("Файл успешно удален: " + filePath);
+        } catch (Exception e) {
+            logger.severe("Не удалось удалить файл: " + e.getMessage());
+            throw new IOException("Ошибка удаления файла с Yandex.Disk", e);
+        }
+    }
+
     public String getFolder() {
         return folder;
     }
+    
+    public void clearFolder(String folderPath) throws IOException {
+        String url = UriComponentsBuilder
+                .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
+                .queryParam("path", folderPath)
+                .queryParam("limit", "1000")
+                .build()
+                .toUriString();
 
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "OAuth " + getCleanToken());
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+            JsonNode jsonNode = objectMapper.readTree(response.getBody());
+            JsonNode items = jsonNode.get("_embedded").get("items");
+            
+            if (items != null && items.isArray()) {
+                for (JsonNode item : items) {
+                    String path = item.get("path").asText();
+                    deleteFile(path);
+                    logger.info("Удален файл: " + path);
+                }
+            }
+            
+            logger.info("Папка " + folderPath + " очищена");
+        } catch (Exception e) {
+            logger.severe("Ошибка при очистке папки: " + e.getMessage());
+            throw new IOException("Ошибка очистки папки", e);
+        }
+    }
 }

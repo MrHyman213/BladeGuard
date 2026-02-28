@@ -1,0 +1,85 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-submissions-table
+      author: system
+      changes:
+        - createTable:
+            tableName: submissions
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: user_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: username
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: model_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: true
+              - column:
+                  name: description
+                  type: TEXT
+                  constraints:
+                    nullable: true
+              - column:
+                  name: photo_path
+                  type: VARCHAR(500)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: status
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: moderated_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: true
+              - column:
+                  name: moderated_by
+                  type: BIGINT
+                  constraints:
+                    nullable: true
+        
+        - sql:
+            sql: "ALTER TABLE submissions ADD CONSTRAINT chk_submissions_status CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))"
+        
+        - createIndex:
+            tableName: submissions
+            indexName: idx_submissions_status
+            columns:
+              - column:
+                  name: status
+        
+        - createIndex:
+            tableName: submissions
+            indexName: idx_submissions_user_id
+            columns:
+              - column:
+                  name: user_id
+        
+        - createIndex:
+            tableName: submissions
+            indexName: idx_submissions_created_at
+            columns:
+              - column:
+                  name: created_at

@@ -5,37 +5,37 @@ services:
     image: postgres:16-alpine
     container_name: knife-certs-db
     environment:
-      POSTGRES_DB: knife_certs
+      POSTGRES_DB: knife_certificates
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    networks:
-      - knife-certs-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
     container_name: knife-certs-bot
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: knife_certs
-      DB_USER: postgres
-      DB_PASSWORD: postgres
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN}
+      TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME}
       YANDEX_DISK_TOKEN: ${YANDEX_DISK_TOKEN}
-      YANDEX_DISK_FOLDER: /certificates
-    depends_on:
-      - postgres
-    networks:
-      - knife-certs-network
+      YANDEX_DISK_FOLDER: ${YANDEX_DISK_FOLDER}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/knife_certificates
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: postgres
+    ports:
+      - "8080:8080"
 
 volumes:
   postgres_data:
-
-networks:
-  knife-certs-network:
-    driver: bridge

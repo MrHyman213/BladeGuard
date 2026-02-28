@@ -1,0 +1,13 @@
+databaseChangeLog:
+  - changeSet:
+      id: 002-add-rejection-reason
+      author: system
+      changes:
+        - addColumn:
+            tableName: submissions
+            columns:
+              - column:
+                  name: rejection_reason
+                  type: TEXT
+                  constraints:
+                    nullable: true

@@ -32,6 +32,8 @@ build/
 .vscode/
 
 ### Environment ###
+.kiro
+.docs
 .env
 *.log
 

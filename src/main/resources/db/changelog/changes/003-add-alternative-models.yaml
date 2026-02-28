@@ -1,0 +1,13 @@
+databaseChangeLog:
+  - changeSet:
+      id: 003-add-alternative-models
+      author: system
+      changes:
+        - addColumn:
+            tableName: submissions
+            columns:
+              - column:
+                  name: alternative_models
+                  type: TEXT
+                  constraints:
+                    nullable: true
