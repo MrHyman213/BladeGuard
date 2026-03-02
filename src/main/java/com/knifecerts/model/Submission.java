@@ -2,11 +2,14 @@ package com.knifecerts.model;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -14,6 +17,10 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.JoinTable;
+import jakarta.persistence.ManyToMany;
+import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 
@@ -55,20 +62,28 @@ public class Submission {
     private String username;
     
     /**
-     * Название модели ножа (опциональное).
+     * Название ножа (опциональное).
      * Может быть null, если пользователь пропустил этот шаг.
      * Требование: 12.6
      */
     @Column
-    private String modelName;
+    private String name;
     
     /**
-     * Описание сертификата (опциональное).
+     * Бренд ножа (опциональное).
      * Может быть null, если пользователь пропустил этот шаг.
      * Требование: 12.6
      */
     @Column(columnDefinition = "TEXT")
-    private String description;
+    private String brand;
+    
+    /**
+     * Индекс ножа (опциональное).
+     * Может быть null, если пользователь пропустил этот шаг.
+     * Требование: 12.6
+     */
+    @Column(length = 100)
+    private String indexCode;
     
     /**
      * Путь к фото на Yandex.Disk.
@@ -124,6 +139,24 @@ public class Submission {
     @Column(columnDefinition = "TEXT")
     private String alternativeModels;
     
+    /**
+     * Связи с моделями ножей (многие-ко-многим через SubmissionModel).
+     */
+    @OneToMany(mappedBy = "submission", cascade = CascadeType.ALL, orphanRemoval = true)
+    private Set<SubmissionModel> submissionModels = new HashSet<>();
+    
+    /**
+     * Альтернативные сертификаты (многие-ко-многим).
+     * Связь двусторонняя - если A альтернатива B, то B альтернатива A.
+     */
+    @ManyToMany
+    @JoinTable(
+        name = "certificate_alternatives",
+        joinColumns = @JoinColumn(name = "certificate_id"),
+        inverseJoinColumns = @JoinColumn(name = "alternative_certificate_id")
+    )
+    private Set<Submission> alternatives = new HashSet<>();
+    
     @Transient
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     
@@ -138,16 +171,16 @@ public class Submission {
      * 
      * @param userId Telegram ID пользователя
      * @param username Telegram username пользователя
-     * @param modelName Название модели (может быть null)
-     * @param description Описание (может быть null)
+     * @param name Название ножа (может быть null)
+     * @param brand Бренд (может быть null)
      * @param photoPath Путь к фото на Yandex.Disk
      */
-    public Submission(Long userId, String username, String modelName, 
-                     String description, String photoPath) {
+    public Submission(Long userId, String username, String name, 
+                     String brand, String photoPath) {
         this.userId = userId;
         this.username = username;
-        this.modelName = modelName;
-        this.description = description;
+        this.name = name;
+        this.brand = brand;
         this.photoPath = photoPath;
         this.status = SubmissionStatus.PENDING;
         this.createdAt = LocalDateTime.now();
@@ -179,20 +212,28 @@ public class Submission {
         this.username = username;
     }
     
-    public String getModelName() {
-        return modelName;
+    public String getName() {
+        return name;
     }
     
-    public void setModelName(String modelName) {
-        this.modelName = modelName;
+    public void setName(String name) {
+        this.name = name;
     }
     
-    public String getDescription() {
-        return description;
+    public String getBrand() {
+        return brand;
     }
     
-    public void setDescription(String description) {
-        this.description = description;
+    public void setBrand(String brand) {
+        this.brand = brand;
+    }
+    
+    public String getIndexCode() {
+        return indexCode;
+    }
+    
+    public void setIndexCode(String indexCode) {
+        this.indexCode = indexCode;
     }
     
     public String getPhotoPath() {
@@ -294,5 +335,78 @@ public class Submission {
      */
     public void setAlternativeModels(String alternativeModels) {
         this.alternativeModels = alternativeModels;
+    }
+    
+    /**
+     * Получить отображаемое название (название + индекс).
+     * Если индекс не задан - возвращает только название.
+     * Если название не задано - возвращает "Сертификат #ID".
+     * 
+     * @return отображаемое название
+     */
+    public String getDisplayName() {
+        if (name == null || name.trim().isEmpty()) {
+            return "Сертификат #" + id;
+        }
+        if (indexCode != null && !indexCode.trim().isEmpty()) {
+            return name + ", " + indexCode;
+        }
+        return name;
+    }
+    
+    /**
+     * Получить связи с моделями ножей.
+     * 
+     * @return набор связей
+     */
+    public Set<SubmissionModel> getSubmissionModels() {
+        return submissionModels;
+    }
+    
+    /**
+     * Установить связи с моделями ножей.
+     * 
+     * @param submissionModels набор связей
+     */
+    public void setSubmissionModels(Set<SubmissionModel> submissionModels) {
+        this.submissionModels = submissionModels;
+    }
+    
+    /**
+     * Получить альтернативные сертификаты.
+     * 
+     * @return набор альтернативных сертификатов
+     */
+    public Set<Submission> getAlternatives() {
+        return alternatives;
+    }
+    
+    /**
+     * Установить альтернативные сертификаты.
+     * 
+     * @param alternatives набор альтернативных сертификатов
+     */
+    public void setAlternatives(Set<Submission> alternatives) {
+        this.alternatives = alternatives;
+    }
+    
+    /**
+     * Добавить альтернативный сертификат.
+     * 
+     * @param alternative альтернативный сертификат
+     */
+    public void addAlternative(Submission alternative) {
+        this.alternatives.add(alternative);
+        alternative.getAlternatives().add(this);
+    }
+    
+    /**
+     * Удалить альтернативный сертификат.
+     * 
+     * @param alternative альтернативный сертификат
+     */
+    public void removeAlternative(Submission alternative) {
+        this.alternatives.remove(alternative);
+        alternative.getAlternatives().remove(this);
     }
 }

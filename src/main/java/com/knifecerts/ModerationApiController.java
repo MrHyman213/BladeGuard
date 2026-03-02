@@ -75,8 +75,9 @@ public class ModerationApiController {
             
             SubmissionDto dto = new SubmissionDto();
             dto.setId(submission.getId());
-            dto.setModelName(submission.getModelName());
-            dto.setDescription(submission.getDescription());
+            dto.setName(submission.getName());
+            dto.setBrand(submission.getBrand());
+            dto.setIndexCode(submission.getIndexCode());
             dto.setAlternativeModels(submission.getAlternativeModelsList());
             dto.setPhotoUrl(photoUrl);
             dto.setUsername(submission.getUsername());
@@ -115,8 +116,9 @@ public class ModerationApiController {
         try {
             submissionService.updateSubmission(
                 session.getSubmissionId(),
-                request.getModelName(),
-                request.getDescription(),
+                request.getName(),
+                request.getBrand(),
+                request.getIndexCode(),
                 request.getAlternativeModels()
             );
             

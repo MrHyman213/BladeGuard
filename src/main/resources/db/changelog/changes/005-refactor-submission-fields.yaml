@@ -1,0 +1,28 @@
+databaseChangeLog:
+  - changeSet:
+      id: 005-refactor-submission-fields
+      author: system
+      changes:
+        # Переименовываем model_name в name
+        - renameColumn:
+            tableName: submissions
+            oldColumnName: model_name
+            newColumnName: name
+            columnDataType: VARCHAR(255)
+        
+        # Переименовываем description в brand
+        - renameColumn:
+            tableName: submissions
+            oldColumnName: description
+            newColumnName: brand
+            columnDataType: TEXT
+        
+        # Добавляем новое поле index_code
+        - addColumn:
+            tableName: submissions
+            columns:
+              - column:
+                  name: index_code
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: true

@@ -14,6 +14,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.knifecerts.model.Submission;
+import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.repository.SubmissionModelRepository;
 import com.knifecerts.repository.SubmissionRepository;
 
 import net.jqwik.api.Arbitraries;
@@ -67,7 +69,9 @@ public class ErrorHandlingPropertyTest {
             submission.setId(1L);
             when(repository.findById(1L)).thenReturn(java.util.Optional.of(submission));
             
-            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService);
+            KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+            SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService, knifeModelRepository, submissionModelRepository);
             
             // Пытаемся одобрить заявку (должна произойти ошибка)
             try {
@@ -114,7 +118,9 @@ public class ErrorHandlingPropertyTest {
             when(repository.findById(submissionId))
                     .thenThrow(new RuntimeException(errorMessage));
             
-            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService);
+            KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+            SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService, knifeModelRepository, submissionModelRepository);
             
             // Пытаемся получить заявку (должна произойти ошибка)
             try {
@@ -162,7 +168,9 @@ public class ErrorHandlingPropertyTest {
             when(repository.save(any(Submission.class)))
                     .thenThrow(new RuntimeException("Database connection failed"));
             
-            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService);
+            KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+            SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+            SubmissionService submissionService = new SubmissionService(repository, yandexDiskService, knifeModelRepository, submissionModelRepository);
             
             // Пытаемся создать заявку (должна произойти ошибка)
             try {

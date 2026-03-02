@@ -9,8 +9,9 @@ import java.util.List;
 public class SubmissionDto {
     
     private Long id;
-    private String modelName;
-    private String description;
+    private String name;
+    private String brand;
+    private String indexCode;
     private List<String> alternativeModels;
     private String photoUrl;
     private String username;
@@ -29,20 +30,28 @@ public class SubmissionDto {
         this.id = id;
     }
     
-    public String getModelName() {
-        return modelName;
+    public String getName() {
+        return name;
     }
     
-    public void setModelName(String modelName) {
-        this.modelName = modelName;
+    public void setName(String name) {
+        this.name = name;
     }
     
-    public String getDescription() {
-        return description;
+    public String getBrand() {
+        return brand;
     }
     
-    public void setDescription(String description) {
-        this.description = description;
+    public void setBrand(String brand) {
+        this.brand = brand;
+    }
+    
+    public String getIndexCode() {
+        return indexCode;
+    }
+    
+    public void setIndexCode(String indexCode) {
+        this.indexCode = indexCode;
     }
     
     public List<String> getAlternativeModels() {

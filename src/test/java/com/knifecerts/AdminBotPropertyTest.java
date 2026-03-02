@@ -57,9 +57,9 @@ class AdminBotPropertyTest {
         assertThat(formattedMessage).contains("@" + submission.getUsername());
         assertThat(formattedMessage).contains("Дата:");
         
-        // Если есть название модели, оно должно быть в сообщении
-        if (submission.getModelName() != null) {
-            assertThat(formattedMessage).contains("Модель: " + submission.getModelName());
+        // Если есть название, оно должно быть в сообщении
+        if (submission.getName() != null) {
+            assertThat(formattedMessage).contains("Модель: " + submission.getDisplayName());
         }
     }
     
@@ -119,16 +119,16 @@ class AdminBotPropertyTest {
         assertThat(detailsMessage).contains("Статус: " + submission.getStatus());
         
         // Проверяем опциональные поля
-        if (submission.getModelName() != null) {
-            assertThat(detailsMessage).contains("Модель: " + submission.getModelName());
+        if (submission.getName() != null) {
+            assertThat(detailsMessage).contains("Название: " + submission.getName());
         } else {
-            assertThat(detailsMessage).contains("Модель: не указана");
+            assertThat(detailsMessage).contains("Название: не указано");
         }
         
-        if (submission.getDescription() != null) {
-            assertThat(detailsMessage).contains("Описание: " + submission.getDescription());
+        if (submission.getBrand() != null) {
+            assertThat(detailsMessage).contains("Бренд: " + submission.getBrand());
         } else {
-            assertThat(detailsMessage).contains("Описание: не указано");
+            assertThat(detailsMessage).contains("Бренд: не указан");
         }
     }
     
@@ -208,8 +208,8 @@ class AdminBotPropertyTest {
         message.append("🆔 ID: ").append(submission.getId()).append("\n");
         message.append("👤 Пользователь: @").append(submission.getUsername()).append("\n");
         
-        if (submission.getModelName() != null) {
-            message.append("🔪 Модель: ").append(submission.getModelName()).append("\n");
+        if (submission.getName() != null) {
+            message.append("🔪 Название: ").append(submission.getName()).append("\n");
         }
         
         message.append("📅 Дата: ").append(submission.getCreatedAt()).append("\n");
@@ -222,16 +222,16 @@ class AdminBotPropertyTest {
         message.append("👤 Пользователь: @").append(submission.getUsername()).append("\n");
         message.append("🆔 User ID: ").append(submission.getUserId()).append("\n");
         
-        if (submission.getModelName() != null) {
-            message.append("🔪 Модель: ").append(submission.getModelName()).append("\n");
+        if (submission.getName() != null) {
+            message.append("🔪 Название: ").append(submission.getName()).append("\n");
         } else {
-            message.append("🔪 Модель: не указана\n");
+            message.append("🔪 Название: не указано\n");
         }
         
-        if (submission.getDescription() != null) {
-            message.append("📝 Описание: ").append(submission.getDescription()).append("\n");
+        if (submission.getBrand() != null) {
+            message.append("🏷️ Бренд: ").append(submission.getBrand()).append("\n");
         } else {
-            message.append("📝 Описание: не указано\n");
+            message.append("🏷️ Бренд: не указан\n");
         }
         
         message.append("📅 Дата подачи: ").append(submission.getCreatedAt()).append("\n");

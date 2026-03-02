@@ -40,8 +40,8 @@ class ConversationStateManagerTest {
         assertThat(state.getUserId()).isEqualTo(userId);
         assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_PHOTO);
         assertThat(state.getPhotoFileId()).isNull();
-        assertThat(state.getModelName()).isNull();
-        assertThat(state.getDescription()).isNull();
+        assertThat(state.getName()).isNull();
+        assertThat(state.getBrand()).isNull();
     }
     
     @Test
@@ -76,7 +76,7 @@ class ConversationStateManagerTest {
         Long userId = 12345L;
         manager.startConversation(userId);
         
-        ConversationState updatedState = new ConversationState(userId, ConversationStep.WAITING_FOR_MODEL_NAME);
+        ConversationState updatedState = new ConversationState(userId, ConversationStep.WAITING_FOR_NAME);
         updatedState.setPhotoFileId("file123");
         
         // When
@@ -84,7 +84,7 @@ class ConversationStateManagerTest {
         
         // Then
         ConversationState state = manager.getState(userId);
-        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_MODEL_NAME);
+        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_NAME);
         assertThat(state.getPhotoFileId()).isEqualTo("file123");
     }
     
@@ -178,21 +178,21 @@ class ConversationStateManagerTest {
         ConversationState state = manager.getState(userId);
         assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_PHOTO);
         
-        state.setCurrentStep(ConversationStep.WAITING_FOR_MODEL_NAME);
+        state.setCurrentStep(ConversationStep.WAITING_FOR_NAME);
         state.setPhotoFileId("file123");
         manager.updateState(userId, state);
         
         state = manager.getState(userId);
-        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_MODEL_NAME);
+        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_NAME);
         assertThat(state.getPhotoFileId()).isEqualTo("file123");
         
-        state.setCurrentStep(ConversationStep.WAITING_FOR_DESCRIPTION);
-        state.setModelName("Victorinox");
+        state.setCurrentStep(ConversationStep.WAITING_FOR_BRAND);
+        state.setName("Victorinox");
         manager.updateState(userId, state);
         
         state = manager.getState(userId);
-        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_DESCRIPTION);
-        assertThat(state.getModelName()).isEqualTo("Victorinox");
+        assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_BRAND);
+        assertThat(state.getName()).isEqualTo("Victorinox");
         
         // Then - finalize by clearing
         manager.clearState(userId);
@@ -226,8 +226,8 @@ class ConversationStateManagerTest {
         assertThat(state.getUserId()).isEqualTo(userId);
         assertThat(state.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_PHOTO);
         assertThat(state.getPhotoFileId()).isNull();
-        assertThat(state.getModelName()).isNull();
-        assertThat(state.getDescription()).isNull();
+        assertThat(state.getName()).isNull();
+        assertThat(state.getBrand()).isNull();
         assertThat(manager.hasActiveConversation(userId)).isTrue();
     }
     
@@ -254,9 +254,9 @@ class ConversationStateManagerTest {
         // Simulate conversation progress
         ConversationState state = manager.getState(userId);
         state.setPhotoFileId(photoFileId);
-        state.setModelName(modelName);
-        state.setDescription(description);
-        state.setCurrentStep(ConversationStep.WAITING_FOR_DESCRIPTION);
+        state.setName(modelName);
+        state.setBrand(description);
+        state.setCurrentStep(ConversationStep.WAITING_FOR_BRAND);
         manager.updateState(userId, state);
         
         // Verify state exists before clearing

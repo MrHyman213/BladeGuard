@@ -14,6 +14,8 @@ import static org.mockito.Mockito.when;
 
 import com.knifecerts.model.Submission;
 import com.knifecerts.model.SubmissionStatus;
+import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.repository.SubmissionModelRepository;
 import com.knifecerts.repository.SubmissionRepository;
 
 /**
@@ -36,7 +38,9 @@ public class IntegrationTest {
     void setUp() {
         submissionRepository = mock(SubmissionRepository.class);
         yandexDiskService = mock(YandexDiskService.class);
-        submissionService = new SubmissionService(submissionRepository, yandexDiskService);
+        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+        SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+        submissionService = new SubmissionService(submissionRepository, yandexDiskService, knifeModelRepository, submissionModelRepository);
     }
     
     /**
@@ -67,8 +71,8 @@ public class IntegrationTest {
         assertThat(result.getStatus()).isEqualTo(SubmissionStatus.PENDING);
         assertThat(result.getUserId()).isEqualTo(userId);
         assertThat(result.getUsername()).isEqualTo(username);
-        assertThat(result.getModelName()).isEqualTo(modelName);
-        assertThat(result.getDescription()).isEqualTo(description);
+        assertThat(result.getName()).isEqualTo(modelName);
+        assertThat(result.getBrand()).isEqualTo(description);
         assertThat(result.getPhotoPath()).isEqualTo(photoPath);
         assertThat(result.getModeratedAt()).isNull();
         assertThat(result.getModeratedBy()).isNull();
@@ -165,8 +169,8 @@ public class IntegrationTest {
         
         // Assert
         assertThat(result).isNotNull();
-        assertThat(result.getModelName()).isNull();
-        assertThat(result.getDescription()).isNull();
+        assertThat(result.getName()).isNull();
+        assertThat(result.getBrand()).isNull();
         assertThat(result.getStatus()).isEqualTo(SubmissionStatus.PENDING);
         
         verify(submissionRepository, times(1)).save(any(Submission.class));

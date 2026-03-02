@@ -86,6 +86,16 @@ public class KnifeBot extends TelegramLongPollingBot {
             }
         } catch (Exception e) {
             logger.severe("Unexpected error in KnifeBot: " + e.getClass().getName() + " - " + e.getMessage());
+            
+            // Игнорируем сетевые ошибки Telegram API
+            if (e instanceof java.net.UnknownHostException || 
+                e instanceof java.net.SocketTimeoutException ||
+                e.getCause() instanceof java.net.UnknownHostException ||
+                e.getCause() instanceof java.net.SocketTimeoutException) {
+                logger.warning("Сетевая ошибка Telegram API (игнорируется): " + e.getMessage());
+                return;
+            }
+            
             e.printStackTrace();
             
             try {
@@ -135,12 +145,47 @@ public class KnifeBot extends TelegramLongPollingBot {
                 handleFormSubmit(userId, chatId);
             } else if (data.equals("form_close")) {
                 handleFormClose(userId, chatId);
-            } else if (data.equals("form_edit_model")) {
-                handleFormEditField(userId, chatId, "model");
-            } else if (data.equals("form_edit_desc")) {
-                handleFormEditField(userId, chatId, "desc");
+            } else if (data.equals("form_edit_name")) {
+                handleFormEditField(userId, chatId, "name");
+            } else if (data.equals("form_edit_brand")) {
+                handleFormEditField(userId, chatId, "brand");
+            } else if (data.equals("form_edit_index")) {
+                handleFormEditField(userId, chatId, "index");
             } else if (data.equals("form_edit_alt")) {
                 handleFormEditField(userId, chatId, "alt");
+            } else if (data.startsWith("view_cert_")) {
+                Long certId = Long.parseLong(data.substring(10));
+                handleViewCertificate(chatId, certId);
+            } else if (data.startsWith("search_knife_")) {
+                String knifeName = data.substring(13);
+                handleSearchKnifeByName(chatId, knifeName);
+            } else if (data.startsWith("brand_")) {
+                String brand = data.substring(6);
+                if (brand.startsWith("models_")) {
+                    // brand_models_BrandName_page_N
+                    String[] parts = brand.split("_page_");
+                    String brandName = parts[0].substring(7); // убираем "models_"
+                    int page = Integer.parseInt(parts[1]);
+                    handleListApprovedCertificates(chatId, page, null, brandName);
+                } else {
+                    // brand_BrandName
+                    handleListApprovedCertificates(chatId, 0, null, brand);
+                }
+            } else if (data.startsWith("brands_page_")) {
+                int page = Integer.parseInt(data.substring(12));
+                handleListApprovedCertificates(chatId, page, null, null);
+            } else if (data.startsWith("list_page_")) {
+                // Парсим: list_page_N или list_page_N_search_query
+                String[] parts = data.split("_search_", 2);
+                int page = Integer.parseInt(parts[0].substring(10));
+                String searchQuery = parts.length > 1 ? parts[1] : null;
+                handleListApprovedCertificates(chatId, page, searchQuery);
+            } else if (data.equals("list_search")) {
+                handleListSearchRequest(userId, chatId);
+            } else if (data.equals("list_reset_search")) {
+                handleListApprovedCertificates(chatId, 0, null);
+            } else if (data.equals("list_current_page")) {
+                // Ничего не делаем, это просто индикатор страницы
             }
             
             org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
@@ -231,17 +276,76 @@ public class KnifeBot extends TelegramLongPollingBot {
             case WAITING_FOR_PHOTO:
                 handlePhotoSubmission(update);
                 break;
-            case WAITING_FOR_MODEL_NAME:
-                handleModelNameInput(update);
+            case WAITING_FOR_NAME:
+                handleNameInput(update);
                 break;
-            case WAITING_FOR_DESCRIPTION:
-                handleDescriptionInput(update);
+            case WAITING_FOR_BRAND:
+                handleBrandInput(update);
+                break;
+            case WAITING_FOR_INDEX:
+                handleIndexInput(update);
                 break;
             case WAITING_FOR_ALTERNATIVE_MODELS:
                 handleAlternativeModelsInput(update);
                 break;
-            case FORM_WAITING_MODEL:
-            case FORM_WAITING_DESC:
+            case WAITING_FOR_SEARCH_QUERY:
+                if (update.getMessage().hasText()) {
+                    String searchQuery = update.getMessage().getText().trim();
+                    conversationStateManager.clearState(userId);
+                    
+                    // Используем расширенный поиск по моделям ножей
+                    var searchResult = submissionService.searchCertificatesByKnifeNameDetailed(searchQuery);
+                    
+                    if (searchResult.isEmpty()) {
+                        // Если ничего не найдено, показываем сообщение
+                        SendMessage message = new SendMessage();
+                        message.setChatId(chatId.toString());
+                        message.setText("🔍 По запросу \"" + searchQuery + "\" ничего не найдено.\n\n" +
+                                "Попробуйте изменить запрос или просмотрите полный список.");
+                        
+                        org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                            new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                        List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                            new ArrayList<>();
+                        
+                        List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row1 = new ArrayList<>();
+                        row1.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                            .text("🔍 Новый поиск")
+                            .callbackData("list_search")
+                            .build());
+                        keyboard.add(row1);
+                        
+                        List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row2 = new ArrayList<>();
+                        row2.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                            .text("📋 Полный список")
+                            .callbackData("menu_list")
+                            .build());
+                        keyboard.add(row2);
+                        
+                        List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row3 = new ArrayList<>();
+                        row3.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                            .text("🔙 Главное меню")
+                            .callbackData("back_to_menu")
+                            .build());
+                        keyboard.add(row3);
+                        
+                        markup.setKeyboard(keyboard);
+                        message.setReplyMarkup(markup);
+                        
+                        try {
+                            execute(message);
+                        } catch (Exception e) {
+                            logger.severe("Ошибка при отправке результатов поиска: " + e.getMessage());
+                        }
+                    } else {
+                        // Показываем результаты поиска с учетом типа совпадения
+                        showSearchResults(chatId, searchQuery, searchResult.getSubmissions(), searchResult.isPrimaryMatch());
+                    }
+                }
+                break;
+            case FORM_WAITING_NAME:
+            case FORM_WAITING_BRAND:
+            case FORM_WAITING_INDEX:
             case FORM_WAITING_ALT:
                 // Обрабатываем ввод через форму
                 if (update.getMessage().hasText()) {
@@ -299,7 +403,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             org.telegram.telegrambots.meta.api.objects.Message sentMessage = execute(sendPhoto);
             state.setFormMessageId(sentMessage.getMessageId());
-            state.setCurrentStep(ConversationStep.FORM_WAITING_MODEL); // Устанавливаем статус формы
+            state.setCurrentStep(ConversationStep.FORM_WAITING_NAME); // Устанавливаем статус формы
             conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {
@@ -316,81 +420,92 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         // Кнопка "Название"
         List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row1 = new ArrayList<>();
-        String modelText = state.getModelName() != null ? "🔪 " + state.getModelName() : "🔪 Название (не указано)";
+        String nameText = state.getName() != null ? "🔪 " + state.getName() : "🔪 Название (не указано)";
         row1.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
-            .text(modelText)
-            .callbackData("form_edit_model")
+            .text(nameText)
+            .callbackData("form_edit_name")
             .build());
         keyboard.add(row1);
         
-        // Кнопка "Описание"
+        // Кнопка "Бренд"
         List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row2 = new ArrayList<>();
-        String descText = state.getDescription() != null 
-            ? "📝 " + (state.getDescription().length() > 20 ? state.getDescription().substring(0, 20) + "..." : state.getDescription()) 
-            : "📝 Описание (не указано)";
+        String brandText = state.getBrand() != null 
+            ? "🏷️ " + (state.getBrand().length() > 20 ? state.getBrand().substring(0, 20) + "..." : state.getBrand()) 
+            : "🏷️ Бренд (не указано)";
         row2.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
-            .text(descText)
-            .callbackData("form_edit_desc")
+            .text(brandText)
+            .callbackData("form_edit_brand")
             .build());
         keyboard.add(row2);
         
-        // Кнопка "Альтернативные модели"
+        // Кнопка "Индекс"
         List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row3 = new ArrayList<>();
-        String altText = (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) 
-            ? "🔄 " + String.join(", ", state.getAlternativeModels()) 
-            : "🔄 Альтернативные модели (не указано)";
+        String indexText = state.getIndexCode() != null 
+            ? "🔢 " + state.getIndexCode() 
+            : "🔢 Индекс (не указано)";
         row3.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
-            .text(altText)
-            .callbackData("form_edit_alt")
+            .text(indexText)
+            .callbackData("form_edit_index")
             .build());
         keyboard.add(row3);
         
-        // Кнопки "Отправить" и "Закрыть"
+        // Кнопка "Альтернативные модели"
         List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row4 = new ArrayList<>();
+        String altText = (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) 
+            ? "🔄 " + String.join(", ", state.getAlternativeModels()) 
+            : "🔄 Альтернативные модели (не указано)";
         row4.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+            .text(altText)
+            .callbackData("form_edit_alt")
+            .build());
+        keyboard.add(row4);
+        
+        // Кнопки "Отправить" и "Закрыть"
+        List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row5 = new ArrayList<>();
+        row5.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
             .text("✅ Отправить заявку")
             .callbackData("form_submit")
             .build());
-        row4.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+        row5.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
             .text("❌ Закрыть форму")
             .callbackData("form_close")
             .build());
-        keyboard.add(row4);
+        keyboard.add(row5);
         
         markup.setKeyboard(keyboard);
         return markup;
     }
 
-    private void handleModelNameInput(Update update) {
+    private void handleNameInput(Update update) {
         Long userId = update.getMessage().getFrom().getId();
         Long chatId = update.getMessage().getChatId();
-        
+
         if (!update.getMessage().hasText()) {
-            sendMessage(chatId, "Пожалуйста, введите название модели или отправьте /skip");
+            sendMessage(chatId, "Пожалуйста, введите название или отправьте /skip");
             return;
         }
-        
+
         String text = update.getMessage().getText();
         ConversationState state = conversationStateManager.getState(userId);
-        
+
         if (text.equals("/skip")) {
-            state.setModelName(null);
+            state.setName(null);
         } else {
-            state.setModelName(text);
+            state.setName(text);
         }
-        
-        state.setCurrentStep(ConversationStep.WAITING_FOR_DESCRIPTION);
+
+        state.setCurrentStep(ConversationStep.WAITING_FOR_BRAND);
         conversationStateManager.updateState(userId, state);
-        
-        sendMessage(chatId, "Введите описание сертификата или отправьте /skip, чтобы пропустить:");
+
+        sendMessage(chatId, "Введите бренд ножа или отправьте /skip, чтобы пропустить:");
     }
 
-    private void handleDescriptionInput(Update update) {
+    private void handleBrandInput(Update update) {
         Long userId = update.getMessage().getFrom().getId();
         Long chatId = update.getMessage().getChatId();
         
         if (!update.getMessage().hasText()) {
-            sendMessage(chatId, "Пожалуйста, введите описание или отправьте /skip");
+            sendMessage(chatId, "Пожалуйста, введите бренд или отправьте /skip");
             return;
         }
         
@@ -398,9 +513,33 @@ public class KnifeBot extends TelegramLongPollingBot {
         ConversationState state = conversationStateManager.getState(userId);
         
         if (text.equals("/skip")) {
-            state.setDescription(null);
+            state.setBrand(null);
         } else {
-            state.setDescription(text);
+            state.setBrand(text);
+        }
+        
+        state.setCurrentStep(ConversationStep.WAITING_FOR_INDEX);
+        conversationStateManager.updateState(userId, state);
+        
+        sendMessage(chatId, "Введите индекс ножа или отправьте /skip, чтобы пропустить:");
+    }
+
+    private void handleIndexInput(Update update) {
+        Long userId = update.getMessage().getFrom().getId();
+        Long chatId = update.getMessage().getChatId();
+        
+        if (!update.getMessage().hasText()) {
+            sendMessage(chatId, "Пожалуйста, введите индекс или отправьте /skip");
+            return;
+        }
+        
+        String text = update.getMessage().getText();
+        ConversationState state = conversationStateManager.getState(userId);
+        
+        if (text.equals("/skip")) {
+            state.setIndexCode(null);
+        } else {
+            state.setIndexCode(text);
         }
         
         state.setCurrentStep(ConversationStep.WAITING_FOR_ALTERNATIVE_MODELS);
@@ -457,11 +596,11 @@ public class KnifeBot extends TelegramLongPollingBot {
             org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFileMethod);
             java.io.File photoFile = downloadFile(tgFile);
             
-            // Используем название модели для имени файла
-            String modelName = state.getModelName() != null ? state.getModelName() : "unknown";
+            // Используем название для имени файла
+            String name = state.getName() != null ? state.getName() : "unknown";
             // Очищаем название от недопустимых символов
-            String sanitizedModelName = modelName.replaceAll("[^a-zA-Z0-9а-яА-ЯёЁ_-]", "_");
-            String fileName = sanitizedModelName + "_" + state.getUsername() + "_" + System.currentTimeMillis() + ".jpg";
+            String sanitizedName = name.replaceAll("[^a-zA-Z0-9а-яА-ЯёЁ_-]", "_");
+            String fileName = sanitizedName + "_" + state.getUsername() + "_" + System.currentTimeMillis() + ".jpg";
             String yandexPath;
             
             try (InputStream photoStream = new java.io.FileInputStream(photoFile)) {
@@ -472,8 +611,8 @@ public class KnifeBot extends TelegramLongPollingBot {
                 userId,
                 state.getUsername(),
                 yandexPath,
-                state.getModelName(),
-                state.getDescription(),
+                state.getName(),
+                state.getBrand(),
                 state.getAlternativeModels()
             );
             
@@ -562,7 +701,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             for (Submission submission : submissions) {
                 StringBuilder text = new StringBuilder();
                 text.append("📋 Заявка #").append(submission.getId()).append("\n");
-                text.append("🔪 Модель: ").append(submission.getModelName() != null ? submission.getModelName() : "не указана").append("\n");
+                text.append("🔪 Модель: ").append(submission.getDisplayName()).append("\n");
                 text.append("📅 Дата: ").append(submission.getCreatedAt().format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))).append("\n");
                 text.append("📊 Статус: ");
                 
@@ -644,16 +783,9 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             StringBuilder text = new StringBuilder();
             text.append("📋 Детали заявки #").append(submission.getId()).append("\n\n");
-            text.append("🔪 Модель: ").append(submission.getModelName() != null ? submission.getModelName() : "не указана").append("\n");
-            text.append("📝 Описание: ").append(submission.getDescription() != null ? submission.getDescription() : "не указано").append("\n");
-            
-            List<String> altModels = submission.getAlternativeModelsList();
-            if (!altModels.isEmpty()) {
-                text.append("🔄 Альтернативные модели:\n");
-                for (String model : altModels) {
-                    text.append("  • ").append(model).append("\n");
-                }
-            }
+            text.append("🔪 Название: ").append(submission.getName() != null ? submission.getName() : "не указано").append("\n");
+            text.append("🏷️ Бренд: ").append(submission.getBrand() != null ? submission.getBrand() : "не указан").append("\n");
+            text.append("🔢 Индекс: ").append(submission.getIndexCode() != null ? submission.getIndexCode() : "не указан").append("\n");
             
             text.append("\n📅 Дата подачи: ").append(submission.getCreatedAt().format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))).append("\n");
             text.append("📊 Статус: ");
@@ -775,11 +907,14 @@ public class KnifeBot extends TelegramLongPollingBot {
         try {
             // Обрабатываем ввод в зависимости от текущего шага
             switch (state.getCurrentStep()) {
-                case FORM_WAITING_MODEL:
-                    state.setModelName(text.trim().isEmpty() ? null : text.trim());
+                case FORM_WAITING_NAME:
+                    state.setName(text.trim().isEmpty() ? null : text.trim());
                     break;
-                case FORM_WAITING_DESC:
-                    state.setDescription(text.trim().isEmpty() ? null : text.trim());
+                case FORM_WAITING_BRAND:
+                    state.setBrand(text.trim().isEmpty() ? null : text.trim());
+                    break;
+                case FORM_WAITING_INDEX:
+                    state.setIndexCode(text.trim().isEmpty() ? null : text.trim());
                     break;
                 case FORM_WAITING_ALT:
                     if (text.trim().isEmpty()) {
@@ -797,7 +932,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             }
             
             // Возвращаем статус обратно в режим формы
-            state.setCurrentStep(ConversationStep.FORM_WAITING_MODEL);
+            state.setCurrentStep(ConversationStep.FORM_WAITING_NAME);
             conversationStateManager.updateState(userId, state);
             
             // Удаляем сообщение пользователя
@@ -811,7 +946,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 logger.warning("Не удалось удалить сообщение пользователя: " + e.getMessage());
             }
             
-            // Удаляем сообщение-запрос
+            // Удаляем сообщение-запрос и скрываем клавиатуру
             if (state.getPromptMessageId() != null) {
                 try {
                     org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage deletePrompt = 
@@ -824,6 +959,28 @@ public class KnifeBot extends TelegramLongPollingBot {
                 } catch (Exception e) {
                     logger.warning("Не удалось удалить сообщение-запрос: " + e.getMessage());
                 }
+            }
+            
+            // Скрываем клавиатуру
+            try {
+                SendMessage hideKeyboard = new SendMessage();
+                hideKeyboard.setChatId(chatId.toString());
+                hideKeyboard.setText("✅");
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove remove = 
+                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardRemove();
+                remove.setRemoveKeyboard(true);
+                remove.setSelective(true);
+                hideKeyboard.setReplyMarkup(remove);
+                org.telegram.telegrambots.meta.api.objects.Message msg = execute(hideKeyboard);
+                
+                // Сразу удаляем это сообщение
+                org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage deleteMsg = 
+                    new org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(msg.getMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Не удалось скрыть клавиатуру: " + e.getMessage());
             }
             
             // Обновляем кнопки формы
@@ -845,15 +1002,20 @@ public class KnifeBot extends TelegramLongPollingBot {
         ConversationStep newStep = null;
         
         switch (field) {
-            case "model":
+            case "name":
                 prompt = "🔪 Введите название модели ножа:";
-                currentValue = state.getModelName() != null ? state.getModelName() : "";
-                newStep = ConversationStep.FORM_WAITING_MODEL;
+                currentValue = state.getName() != null ? state.getName() : "";
+                newStep = ConversationStep.FORM_WAITING_NAME;
                 break;
-            case "desc":
-                prompt = "📝 Введите описание сертификата:";
-                currentValue = state.getDescription() != null ? state.getDescription() : "";
-                newStep = ConversationStep.FORM_WAITING_DESC;
+            case "brand":
+                prompt = "🏷️ Введите бренд ножа:";
+                currentValue = state.getBrand() != null ? state.getBrand() : "";
+                newStep = ConversationStep.FORM_WAITING_BRAND;
+                break;
+            case "index":
+                prompt = "🔢 Введите индекс ножа:";
+                currentValue = state.getIndexCode() != null ? state.getIndexCode() : "";
+                newStep = ConversationStep.FORM_WAITING_INDEX;
                 break;
             case "alt":
                 prompt = "🔄 Введите альтернативные модели через запятую:";
@@ -873,18 +1035,11 @@ public class KnifeBot extends TelegramLongPollingBot {
                 message.setChatId(chatId.toString());
                 
                 if (!currentValue.isEmpty()) {
-                    
-                    message.setText(prompt + "\n\nТекущее значение:\n" + currentValue + "\n\n💡 Отправьте новое значение или пустое сообщение для очистки");
+                    message.setText(prompt + "\n\n📋 Текущее значение:\n`" + currentValue + "`\n\n💡 Отправьте новое значение или пустое сообщение для очистки");
+                    message.setParseMode("Markdown");
                 } else {
                     message.setText(prompt + "\n\n💡 Отправьте значение или пустое сообщение для пропуска");
                 }
-                
-                // ForceReply заставит пользователя ответить на это сообщение
-                org.telegram.telegrambots.meta.api.objects.replykeyboard.ForceReplyKeyboard forceReply = 
-                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.ForceReplyKeyboard();
-                forceReply.setSelective(true);
-                forceReply.setInputFieldPlaceholder(currentValue.isEmpty() ? "Введите значение..." : currentValue);
-                message.setReplyMarkup(forceReply);
                 
                 org.telegram.telegrambots.meta.api.objects.Message sentMessage = execute(message);
                 
@@ -927,9 +1082,9 @@ public class KnifeBot extends TelegramLongPollingBot {
             org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFileMethod);
             java.io.File photoFile = downloadFile(tgFile);
             
-            String modelName = state.getModelName() != null ? state.getModelName() : "unknown";
-            String sanitizedModelName = modelName.replaceAll("[^a-zA-Z0-9а-яА-ЯёЁ_-]", "_");
-            String fileName = sanitizedModelName + "_" + state.getUsername() + "_" + System.currentTimeMillis() + ".jpg";
+            String name = state.getName() != null ? state.getName() : "unknown";
+            String sanitizedName = name.replaceAll("[^a-zA-Z0-9а-яА-ЯёЁ_-]", "_");
+            String fileName = sanitizedName + "_" + state.getUsername() + "_" + System.currentTimeMillis() + ".jpg";
             String yandexPath;
             
             try (InputStream photoStream = new java.io.FileInputStream(photoFile)) {
@@ -940,8 +1095,8 @@ public class KnifeBot extends TelegramLongPollingBot {
                 userId,
                 state.getUsername(),
                 yandexPath,
-                state.getModelName(),
-                state.getDescription(),
+                state.getName(),
+                state.getBrand(),
                 state.getAlternativeModels()
             );
             
@@ -993,13 +1148,50 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
     
     private void handleListApprovedCertificates(Long chatId) {
+        handleListApprovedCertificates(chatId, 0, null, null);
+    }
+    
+    private void handleListApprovedCertificates(Long chatId, int page, String searchQuery) {
+        handleListApprovedCertificates(chatId, page, searchQuery, null);
+    }
+    
+    private void handleListApprovedCertificates(Long chatId, int page, String searchQuery, String selectedBrand) {
         try {
-            List<Submission> approved = submissionService.getApprovedSubmissions();
+            // Если бренд не выбран, показываем список брендов
+            if (selectedBrand == null) {
+                showBrandsList(chatId, page, searchQuery);
+            } else {
+                // Если бренд выбран, показываем модели этого бренда
+                showKnifeNamesByBrand(chatId, selectedBrand, page, searchQuery);
+            }
+        } catch (Exception e) {
+            logger.severe("Ошибка при получении списка: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при получении списка");
+        }
+    }
+    
+    /**
+     * Показывает список брендов.
+     */
+    private void showBrandsList(Long chatId, int page, String searchQuery) {
+        try {
+            List<String> allBrands;
             
-            if (approved.isEmpty()) {
+            // Используем поиск или получаем все бренды
+            if (searchQuery != null && !searchQuery.trim().isEmpty()) {
+                allBrands = submissionService.getAllApprovedBrands().stream()
+                    .filter(brand -> brand.toLowerCase().contains(searchQuery.toLowerCase()))
+                    .collect(java.util.stream.Collectors.toList());
+            } else {
+                allBrands = submissionService.getAllApprovedBrands();
+            }
+            
+            if (allBrands.isEmpty()) {
                 SendMessage message = new SendMessage();
                 message.setChatId(chatId.toString());
-                message.setText("📭 Пока нет одобренных сертификатов.");
+                message.setText(searchQuery != null 
+                    ? "🔍 По запросу \"" + searchQuery + "\" ничего не найдено."
+                    : "📭 Пока нет одобренных сертификатов.");
                 
                 org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
                     new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
@@ -1020,9 +1212,19 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            StringBuilder text = new StringBuilder("📋 Список одобренных моделей:\n\n");
-            for (Submission sub : approved) {
-                text.append("🔪 ").append(sub.getModelName() != null ? sub.getModelName() : "Без названия").append("\n");
+            // Пагинация: 10 строк по 2 кнопки = 20 элементов на страницу (для брендов)
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allBrands.size());
+            
+            List<String> pageItems = allBrands.subList(startIndex, endIndex);
+            
+            StringBuilder text = new StringBuilder();
+            text.append("🏷️ Выберите бренд:\n\n");
+            text.append("Найдено: ").append(allBrands.size()).append(" брендов\n");
+            if (totalPages > 1) {
+                text.append("Страница ").append(page + 1).append(" из ").append(totalPages);
             }
             
             SendMessage message = new SendMessage();
@@ -1034,12 +1236,67 @@ public class KnifeBot extends TelegramLongPollingBot {
             List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
                 new ArrayList<>();
             
-            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
-            row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+            // Кнопки с брендами (2 колонки)
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageItems.size(); i++) {
+                String brand = pageItems.get(i);
+                
+                // Обрезаем длинные названия
+                String displayName = brand;
+                if (displayName.length() > 20) {
+                    displayName = displayName.substring(0, 17) + "...";
+                }
+                
+                currentRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("brand_" + brand)
+                    .build());
+                
+                // Добавляем строку после 2 кнопок
+                if (currentRow.size() == 2) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            // Добавляем последнюю неполную строку
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Кнопки пагинации
+            if (totalPages > 1) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> paginationRow = new ArrayList<>();
+                
+                if (page > 0) {
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("⬅️ Назад")
+                        .callbackData("brands_page_" + (page - 1))
+                        .build());
+                }
+                
+                paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("list_current_page")
+                    .build());
+                
+                if (page < totalPages - 1) {
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("Вперёд ➡️")
+                        .callbackData("brands_page_" + (page + 1))
+                        .build());
+                }
+                
+                keyboard.add(paginationRow);
+            }
+            
+            // Кнопка возврата в меню
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
                 .text("🔙 Главное меню")
                 .callbackData("back_to_menu")
                 .build());
-            keyboard.add(row);
+            keyboard.add(menuRow);
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -1047,8 +1304,410 @@ public class KnifeBot extends TelegramLongPollingBot {
             execute(message);
             
         } catch (Exception e) {
-            logger.severe("Ошибка при получении списка: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при получении списка");
+            logger.severe("Ошибка при отображении брендов: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении брендов");
+        }
+    }
+    
+    /**
+     * Показывает список моделей ножей конкретного бренда.
+     */
+    private void showKnifeNamesByBrand(Long chatId, String brand, int page, String searchQuery) {
+        try {
+            List<String> allKnifeNames = submissionService.getApprovedKnifeNamesByBrand(brand);
+            
+            if (allKnifeNames.isEmpty()) {
+                SendMessage message = new SendMessage();
+                message.setChatId(chatId.toString());
+                message.setText("📭 У бренда \"" + brand + "\" пока нет сертификатов.");
+                
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                    new ArrayList<>();
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("🔙 К брендам")
+                    .callbackData("menu_list")
+                    .build());
+                keyboard.add(row);
+                
+                markup.setKeyboard(keyboard);
+                message.setReplyMarkup(markup);
+                
+                execute(message);
+                return;
+            }
+            
+            // Пагинация: 10 строк по 3 кнопки = 30 элементов на страницу
+            int itemsPerPage = 30;
+            int totalPages = (int) Math.ceil((double) allKnifeNames.size() / itemsPerPage);
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allKnifeNames.size());
+            
+            List<String> pageItems = allKnifeNames.subList(startIndex, endIndex);
+            
+            StringBuilder text = new StringBuilder();
+            text.append("🏷️ Бренд: ").append(brand).append("\n\n");
+            text.append("📋 Выберите модель:\n\n");
+            text.append("Найдено: ").append(allKnifeNames.size()).append(" моделей\n");
+            if (totalPages > 1) {
+                text.append("Страница ").append(page + 1).append(" из ").append(totalPages);
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            
+            org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+            List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                new ArrayList<>();
+            
+            // Кнопки с моделями (3 колонки)
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageItems.size(); i++) {
+                String knifeName = pageItems.get(i);
+                
+                // Обрезаем длинные названия
+                String displayName = knifeName;
+                if (displayName.length() > 15) {
+                    displayName = displayName.substring(0, 12) + "...";
+                }
+                
+                currentRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("search_knife_" + knifeName)
+                    .build());
+                
+                // Добавляем строку после 3 кнопок
+                if (currentRow.size() == 3) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            // Добавляем последнюю неполную строку
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Кнопки пагинации
+            if (totalPages > 1) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> paginationRow = new ArrayList<>();
+                
+                if (page > 0) {
+                    String prevCallback = "brand_models_" + brand + "_page_" + (page - 1);
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("⬅️ Назад")
+                        .callbackData(prevCallback)
+                        .build());
+                }
+                
+                paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("list_current_page")
+                    .build());
+                
+                if (page < totalPages - 1) {
+                    String nextCallback = "brand_models_" + brand + "_page_" + (page + 1);
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("Вперёд ➡️")
+                        .callbackData(nextCallback)
+                        .build());
+                }
+                
+                keyboard.add(paginationRow);
+            }
+            
+            // Кнопка возврата к брендам
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔙 К брендам")
+                .callbackData("menu_list")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отображении моделей бренда: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении моделей");
+        }
+    }
+    
+    private void handleViewCertificate(Long chatId, Long certId) {
+        try {
+            Submission submission = submissionService.getSubmissionById(certId).orElse(null);
+            
+            if (submission == null) {
+                sendMessage(chatId, "❌ Сертификат не найден");
+                return;
+            }
+            
+            StringBuilder text = new StringBuilder();
+            text.append("🔪 ").append(submission.getDisplayName()).append("\n\n");
+            
+            if (submission.getBrand() != null && !submission.getBrand().isEmpty()) {
+                text.append("🏷️ Бренд: ").append(submission.getBrand()).append("\n");
+            }
+            
+            // Загружаем фото с Yandex.Disk и отправляем
+            try {
+                String photoPath = submission.getPhotoPath();
+                try (java.io.InputStream photoStream = yandexDiskService.downloadPhoto(photoPath)) {
+                    SendPhoto sendPhoto = new SendPhoto();
+                    sendPhoto.setChatId(chatId.toString());
+                    sendPhoto.setPhoto(new InputFile(photoStream, photoPath.substring(photoPath.lastIndexOf('/') + 1)));
+                    sendPhoto.setCaption(text.toString());
+                    
+                    org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                        new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                    List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                        new ArrayList<>();
+                    
+                    List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                    row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("🔙 К списку")
+                        .callbackData("menu_list")
+                        .build());
+                    keyboard.add(row);
+                    
+                    markup.setKeyboard(keyboard);
+                    sendPhoto.setReplyMarkup(markup);
+                    
+                    execute(sendPhoto);
+                }
+            } catch (Exception photoEx) {
+                // Если не удалось загрузить фото, отправляем только текст
+                logger.warning("Не удалось загрузить фото: " + photoEx.getMessage());
+                SendMessage message = new SendMessage();
+                message.setChatId(chatId.toString());
+                message.setText(text.toString() + "\n\n⚠️ Фото временно недоступно");
+                
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                    new ArrayList<>();
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("🔙 К списку")
+                    .callbackData("menu_list")
+                    .build());
+                keyboard.add(row);
+                
+                markup.setKeyboard(keyboard);
+                message.setReplyMarkup(markup);
+                
+                execute(message);
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при просмотре сертификата: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при загрузке сертификата");
+        }
+    }
+    
+    private void handleListSearchRequest(Long userId, Long chatId) {
+        ConversationState state = new ConversationState(userId, ConversationStep.WAITING_FOR_SEARCH_QUERY);
+        conversationStateManager.updateState(userId, state);
+        sendMessage(chatId, "🔍 Введите название модели для поиска:");
+    }
+    
+    /**
+     * Обрабатывает поиск сертификата по названию ножа из списка.
+     * 
+     * @param chatId ID чата
+     * @param knifeName название ножа
+     */
+    private void handleSearchKnifeByName(Long chatId, String knifeName) {
+        try {
+            var searchResult = submissionService.searchCertificatesByKnifeNameDetailed(knifeName);
+            
+            if (searchResult.isEmpty()) {
+                sendMessage(chatId, "❌ Сертификат не найден");
+                return;
+            }
+            
+            List<Submission> results = searchResult.getSubmissions();
+            
+            if (searchResult.isPrimaryMatch() && results.size() == 1) {
+                // Точное совпадение - показываем сертификат
+                handleViewCertificate(chatId, results.get(0).getId());
+            } else {
+                // Показываем список альтернатив
+                showAlternativesList(chatId, knifeName, results, searchResult.isPrimaryMatch());
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при поиске по названию: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при поиске");
+        }
+    }
+    
+    /**
+     * Показывает список альтернативных сертификатов.
+     * 
+     * @param chatId ID чата
+     * @param knifeName название ножа
+     * @param alternatives список альтернативных сертификатов
+     * @param isPrimaryMatch true если найден точный сертификат
+     */
+    private void showAlternativesList(Long chatId, String knifeName, List<Submission> alternatives, boolean isPrimaryMatch) {
+        try {
+            StringBuilder text = new StringBuilder();
+            
+            if (isPrimaryMatch) {
+                text.append("✅ Найдено несколько сертификатов на модель \"").append(knifeName).append("\":\n\n");
+            } else {
+                text.append("⚠️ К сожалению, сертификата именно на модель \"").append(knifeName).append("\" нет в системе.\n\n");
+                text.append("Но мы можем предложить альтернативные варианты:\n\n");
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            
+            org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+            List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                new ArrayList<>();
+            
+            // Показываем до 10 альтернатив
+            int maxAlternatives = Math.min(alternatives.size(), 10);
+            for (int i = 0; i < maxAlternatives; i++) {
+                Submission alt = alternatives.get(i);
+                String displayName = alt.getDisplayName();
+                
+                if (displayName.length() > 40) {
+                    displayName = displayName.substring(0, 37) + "...";
+                }
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("view_cert_" + alt.getId())
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (alternatives.size() > 10) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> moreRow = new ArrayList<>();
+                moreRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("... и еще " + (alternatives.size() - 10) + " вариантов")
+                    .callbackData("list_current_page")
+                    .build());
+                keyboard.add(moreRow);
+            }
+            
+            // Кнопка возврата
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔙 К списку")
+                .callbackData("menu_list")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отображении альтернатив: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении альтернатив");
+        }
+    }
+    
+    /**
+     * Показывает результаты расширенного поиска по моделям ножей.
+     * 
+     * @param chatId ID чата
+     * @param searchQuery поисковый запрос
+     * @param results список найденных сертификатов
+     * @param isPrimaryMatch true если найден точный сертификат, false если альтернативы
+     */
+    private void showSearchResults(Long chatId, String searchQuery, List<Submission> results, boolean isPrimaryMatch) {
+        try {
+            StringBuilder text = new StringBuilder();
+            text.append("🔍 Результаты поиска: \"").append(searchQuery).append("\"\n\n");
+            
+            if (isPrimaryMatch) {
+                // Найден точный сертификат на эту модель
+                text.append("✅ Найден сертификат на эту модель!\n");
+                text.append("Найдено: ").append(results.size()).append(" сертификат(ов)");
+            } else {
+                // Найдены только альтернативы
+                text.append("⚠️ К сожалению, сертификата именно на модель \"").append(searchQuery).append("\" нет в системе.\n\n");
+                text.append("Но мы можем предложить альтернативные варианты:\n");
+                text.append("Найдено: ").append(results.size()).append(" подходящих сертификат(ов)");
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            
+            org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+            List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                new ArrayList<>();
+            
+            // Показываем до 10 результатов
+            int maxResults = Math.min(results.size(), 10);
+            for (int i = 0; i < maxResults; i++) {
+                Submission sub = results.get(i);
+                String displayName = sub.getDisplayName();
+                
+                // Обрезаем длинные названия
+                if (displayName.length() > 40) {
+                    displayName = displayName.substring(0, 37) + "...";
+                }
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("view_cert_" + sub.getId())
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (results.size() > 10) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> moreRow = new ArrayList<>();
+                moreRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("... и еще " + (results.size() - 10) + " результатов")
+                    .callbackData("list_current_page")
+                    .build());
+                keyboard.add(moreRow);
+            }
+            
+            // Кнопки навигации
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> searchRow = new ArrayList<>();
+            searchRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔍 Новый поиск")
+                .callbackData("list_search")
+                .build());
+            keyboard.add(searchRow);
+            
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(menuRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отображении результатов поиска: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении результатов");
         }
     }
 }

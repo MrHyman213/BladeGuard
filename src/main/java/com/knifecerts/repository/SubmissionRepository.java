@@ -65,4 +65,14 @@ public interface SubmissionRepository extends JpaRepository<Submission, Long> {
      * Требование: 7.1 - Проверка наличия ожидающих заявок
      */
     long countByStatus(SubmissionStatus status);
+    
+    /**
+     * Находит одобренные заявки по названию или индексу (поиск без учета регистра).
+     * 
+     * @param name название для поиска
+     * @param indexCode индекс для поиска
+     * @return список найденных заявок
+     */
+    List<Submission> findByStatusAndNameContainingIgnoreCaseOrStatusAndIndexCodeContainingIgnoreCase(
+        SubmissionStatus status1, String name, SubmissionStatus status2, String indexCode);
 }

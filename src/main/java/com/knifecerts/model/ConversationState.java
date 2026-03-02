@@ -35,16 +35,22 @@ public class ConversationState {
     private String username;
     
     /**
-     * Название модели ножа (опциональное).
+     * Название ножа (опциональное).
      * Может быть null, если пользователь пропустил этот шаг.
      */
-    private String modelName;
+    private String name;
     
     /**
-     * Описание сертификата (опциональное).
+     * Бренд ножа (опциональное).
      * Может быть null, если пользователь пропустил этот шаг.
      */
-    private String description;
+    private String brand;
+    
+    /**
+     * Индекс ножа (опциональное).
+     * Может быть null, если пользователь пропустил этот шаг.
+     */
+    private String indexCode;
     
     /**
      * Список альтернативных моделей ножей (опциональное).
@@ -107,20 +113,28 @@ public class ConversationState {
         this.photoFileId = photoFileId;
     }
     
-    public String getModelName() {
-        return modelName;
+    public String getName() {
+        return name;
     }
     
-    public void setModelName(String modelName) {
-        this.modelName = modelName;
+    public void setName(String name) {
+        this.name = name;
     }
     
-    public String getDescription() {
-        return description;
+    public String getBrand() {
+        return brand;
     }
     
-    public void setDescription(String description) {
-        this.description = description;
+    public void setBrand(String brand) {
+        this.brand = brand;
+    }
+    
+    public String getIndexCode() {
+        return indexCode;
+    }
+    
+    public void setIndexCode(String indexCode) {
+        this.indexCode = indexCode;
     }
     
     public String getUsername() {

@@ -377,7 +377,32 @@ public class YandexDiskService {
         return folder;
     }
     
-    public void clearFolder(String folderPath) throws IOException {
+    private boolean folderExists(String folderPath) {
+        try {
+            String checkUrl = UriComponentsBuilder
+                    .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
+                    .queryParam("path", folderPath)
+                    .build()
+                    .toUriString();
+            
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Authorization", "OAuth " + getCleanToken());
+            HttpEntity<String> entity = new HttpEntity<>(headers);
+            
+            restTemplate.exchange(checkUrl, HttpMethod.GET, entity, String.class);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+    
+    public int clearFolder(String folderPath) throws IOException {
+        // Проверяем существование папки
+        if (!folderExists(folderPath)) {
+            logger.info("Папка " + folderPath + " не существует, пропускаем очистку");
+            return 0;
+        }
+        
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
                 .queryParam("path", folderPath)
@@ -392,17 +417,31 @@ public class YandexDiskService {
         try {
             ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
             JsonNode jsonNode = objectMapper.readTree(response.getBody());
-            JsonNode items = jsonNode.get("_embedded").get("items");
             
-            if (items != null && items.isArray()) {
-                for (JsonNode item : items) {
-                    String path = item.get("path").asText();
-                    deleteFile(path);
-                    logger.info("Удален файл: " + path);
-                }
+            // Проверяем наличие _embedded и items
+            JsonNode embedded = jsonNode.get("_embedded");
+            if (embedded == null) {
+                logger.info("Папка " + folderPath + " пуста");
+                return 0;
             }
             
-            logger.info("Папка " + folderPath + " очищена");
+            JsonNode items = embedded.get("items");
+            if (items == null || !items.isArray() || items.size() == 0) {
+                logger.info("Папка " + folderPath + " пуста");
+                return 0;
+            }
+            
+            // Удаляем все файлы
+            int deletedCount = 0;
+            for (JsonNode item : items) {
+                String path = item.get("path").asText();
+                deleteFile(path);
+                deletedCount++;
+                logger.info("Удален файл: " + path);
+            }
+            
+            logger.info("Папка " + folderPath + " очищена. Удалено файлов: " + deletedCount);
+            return deletedCount;
         } catch (Exception e) {
             logger.severe("Ошибка при очистке папки: " + e.getMessage());
             throw new IOException("Ошибка очистки папки", e);

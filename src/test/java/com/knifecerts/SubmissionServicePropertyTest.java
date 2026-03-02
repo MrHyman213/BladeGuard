@@ -9,6 +9,8 @@ import static org.mockito.Mockito.when;
 
 import com.knifecerts.model.Submission;
 import com.knifecerts.model.SubmissionStatus;
+import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.repository.SubmissionModelRepository;
 import com.knifecerts.repository.SubmissionRepository;
 
 import net.jqwik.api.Arbitraries;
@@ -42,7 +44,9 @@ class SubmissionServicePropertyTest {
         // Создаем моки для каждого теста
         SubmissionRepository submissionRepository = mock(SubmissionRepository.class);
         YandexDiskService yandexDiskService = mock(YandexDiskService.class);
-        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService);
+        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+        SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService, knifeModelRepository, submissionModelRepository);
         
         // Настраиваем мок для возврата заявки с ID
         when(submissionRepository.save(any(Submission.class))).thenAnswer(invocation -> {
@@ -64,10 +68,10 @@ class SubmissionServicePropertyTest {
         
         // Опциональные поля могут быть null или иметь значение
         if (modelName != null) {
-            assertThat(result.getModelName()).isEqualTo(modelName);
+            assertThat(result.getName()).isEqualTo(modelName);
         }
         if (description != null) {
-            assertThat(result.getDescription()).isEqualTo(description);
+            assertThat(result.getBrand()).isEqualTo(description);
         }
         
         // Поля модерации должны быть null для новой заявки
@@ -89,7 +93,9 @@ class SubmissionServicePropertyTest {
         // Создаем моки для каждого теста
         SubmissionRepository submissionRepository = mock(SubmissionRepository.class);
         YandexDiskService yandexDiskService = mock(YandexDiskService.class);
-        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService);
+        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+        SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
+        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService, knifeModelRepository, submissionModelRepository);
         
         // Фильтруем только PENDING заявки и сортируем по дате создания
         List<Submission> expectedPending = allSubmissions.stream()

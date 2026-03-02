@@ -7,3 +7,9 @@ databaseChangeLog:
       file: db/changelog/changes/003-add-alternative-models.yaml
   - include:
       file: db/changelog/changes/004-create-moderation-sessions.yaml
+  - include:
+      file: db/changelog/changes/005-refactor-submission-fields.yaml
+  - include:
+      file: db/changelog/changes/006-create-knife-models-tables.yaml
+  - include:
+      file: db/changelog/changes/007-create-certificate-alternatives.yaml

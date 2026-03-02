@@ -1,0 +1,316 @@
+// Замените метод handleListApprovedCertificates на эти три метода:
+
+    private void handleListApprovedCertificates(Long chatId) {
+        handleListApprovedCertificates(chatId, 0, null, null);
+    }
+    
+    private void handleListApprovedCertificates(Long chatId, int page, String searchQuery) {
+        handleListApprovedCertificates(chatId, page, searchQuery, null);
+    }
+    
+    private void handleListApprovedCertificates(Long chatId, int page, String searchQuery, String selectedBrand) {
+        try {
+            // Если бренд не выбран, показываем список брендов
+            if (selectedBrand == null) {
+                showBrandsList(chatId, page, searchQuery);
+            } else {
+                // Если бренд выбран, показываем модели этого бренда
+                showKnifeNamesByBrand(chatId, selectedBrand, page, searchQuery);
+            }
+        } catch (Exception e) {
+            logger.severe("Ошибка при получении списка: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при получении списка");
+        }
+    }
+
+// Добавьте эти два новых метода перед handleListSearchRequest:
+
+    /**
+     * Показывает список брендов.
+     */
+    private void showBrandsList(Long chatId, int page, String searchQuery) {
+        try {
+            List<String> allBrands;
+            
+            // Используем поиск или получаем все бренды
+            if (searchQuery != null && !searchQuery.trim().isEmpty()) {
+                allBrands = submissionService.getAllApprovedBrands().stream()
+                    .filter(brand -> brand.toLowerCase().contains(searchQuery.toLowerCase()))
+                    .collect(java.util.stream.Collectors.toList());
+            } else {
+                allBrands = submissionService.getAllApprovedBrands();
+            }
+            
+            if (allBrands.isEmpty()) {
+                SendMessage message = new SendMessage();
+                message.setChatId(chatId.toString());
+                message.setText(searchQuery != null 
+                    ? "🔍 По запросу \"" + searchQuery + "\" ничего не найдено."
+                    : "📭 Пока нет одобренных сертификатов.");
+                
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                    new ArrayList<>();
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("🔙 Главное меню")
+                    .callbackData("back_to_menu")
+                    .build());
+                keyboard.add(row);
+                
+                markup.setKeyboard(keyboard);
+                message.setReplyMarkup(markup);
+                
+                execute(message);
+                return;
+            }
+            
+            // Пагинация: 10 строк по 2 кнопки = 20 элементов на страницу (для брендов)
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allBrands.size());
+            
+            List<String> pageItems = allBrands.subList(startIndex, endIndex);
+            
+            StringBuilder text = new StringBuilder();
+            text.append("🏷️ Выберите бренд:\n\n");
+            text.append("Найдено: ").append(allBrands.size()).append(" брендов\n");
+            if (totalPages > 1) {
+                text.append("Страница ").append(page + 1).append(" из ").append(totalPages);
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            
+            org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+            List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                new ArrayList<>();
+            
+            // Кнопки с брендами (2 колонки)
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageItems.size(); i++) {
+                String brand = pageItems.get(i);
+                
+                // Обрезаем длинные названия
+                String displayName = brand;
+                if (displayName.length() > 20) {
+                    displayName = displayName.substring(0, 17) + "...";
+                }
+                
+                currentRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("brand_" + brand)
+                    .build());
+                
+                // Добавляем строку после 2 кнопок
+                if (currentRow.size() == 2) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            // Добавляем последнюю неполную строку
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Кнопки пагинации
+            if (totalPages > 1) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> paginationRow = new ArrayList<>();
+                
+                if (page > 0) {
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("⬅️ Назад")
+                        .callbackData("brands_page_" + (page - 1))
+                        .build());
+                }
+                
+                paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("list_current_page")
+                    .build());
+                
+                if (page < totalPages - 1) {
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("Вперёд ➡️")
+                        .callbackData("brands_page_" + (page + 1))
+                        .build());
+                }
+                
+                keyboard.add(paginationRow);
+            }
+            
+            // Кнопка возврата в меню
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(menuRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отображении брендов: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении брендов");
+        }
+    }
+    
+    /**
+     * Показывает список моделей ножей конкретного бренда.
+     */
+    private void showKnifeNamesByBrand(Long chatId, String brand, int page, String searchQuery) {
+        try {
+            List<String> allKnifeNames = submissionService.getApprovedKnifeNamesByBrand(brand);
+            
+            if (allKnifeNames.isEmpty()) {
+                SendMessage message = new SendMessage();
+                message.setChatId(chatId.toString());
+                message.setText("📭 У бренда \"" + brand + "\" пока нет сертификатов.");
+                
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                    new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+                List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                    new ArrayList<>();
+                
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row = new ArrayList<>();
+                row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text("🔙 К брендам")
+                    .callbackData("menu_list")
+                    .build());
+                keyboard.add(row);
+                
+                markup.setKeyboard(keyboard);
+                message.setReplyMarkup(markup);
+                
+                execute(message);
+                return;
+            }
+            
+            // Пагинация: 10 строк по 3 кнопки = 30 элементов на страницу
+            int itemsPerPage = 30;
+            int totalPages = (int) Math.ceil((double) allKnifeNames.size() / itemsPerPage);
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allKnifeNames.size());
+            
+            List<String> pageItems = allKnifeNames.subList(startIndex, endIndex);
+            
+            StringBuilder text = new StringBuilder();
+            text.append("🏷️ Бренд: ").append(brand).append("\n\n");
+            text.append("📋 Выберите модель:\n\n");
+            text.append("Найдено: ").append(allKnifeNames.size()).append(" моделей\n");
+            if (totalPages > 1) {
+                text.append("Страница ").append(page + 1).append(" из ").append(totalPages);
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            
+            org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup markup = 
+                new org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup();
+            List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> keyboard = 
+                new ArrayList<>();
+            
+            // Кнопки с моделями (3 колонки)
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageItems.size(); i++) {
+                String knifeName = pageItems.get(i);
+                
+                // Обрезаем длинные названия
+                String displayName = knifeName;
+                if (displayName.length() > 15) {
+                    displayName = displayName.substring(0, 12) + "...";
+                }
+                
+                currentRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("search_knife_" + knifeName)
+                    .build());
+                
+                // Добавляем строку после 3 кнопок
+                if (currentRow.size() == 3) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            // Добавляем последнюю неполную строку
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Кнопки пагинации
+            if (totalPages > 1) {
+                List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> paginationRow = new ArrayList<>();
+                
+                if (page > 0) {
+                    String prevCallback = "brand_models_" + brand + "_page_" + (page - 1);
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("⬅️ Назад")
+                        .callbackData(prevCallback)
+                        .build());
+                }
+                
+                paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("list_current_page")
+                    .build());
+                
+                if (page < totalPages - 1) {
+                    String nextCallback = "brand_models_" + brand + "_page_" + (page + 1);
+                    paginationRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("Вперёд ➡️")
+                        .callbackData(nextCallback)
+                        .build());
+                }
+                
+                keyboard.add(paginationRow);
+            }
+            
+            // Кнопка возврата к брендам
+            List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                .text("🔙 К брендам")
+                .callbackData("menu_list")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отображении моделей бренда: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении моделей");
+        }
+    }
+
+// Добавьте обработку новых callback в handleCallbackQuery:
+// После строки } else if (data.startsWith("search_knife_")) {
+// Добавьте:
+
+            } else if (data.startsWith("brand_")) {
+                String brand = data.substring(6);
+                if (brand.startsWith("models_")) {
+                    // brand_models_BrandName_page_N
+                    String[] parts = brand.split("_page_");
+                    String brandName = parts[0].substring(7); // убираем "models_"
+                    int page = Integer.parseInt(parts[1]);
+                    handleListApprovedCertificates(chatId, page, null, brandName);
+                } else {
+                    // brand_BrandName
+                    handleListApprovedCertificates(chatId, 0, null, brand);
+                }
+            } else if (data.startsWith("brands_page_")) {
+                int page = Integer.parseInt(data.substring(12));
+                handleListApprovedCertificates(chatId, page, null, null);

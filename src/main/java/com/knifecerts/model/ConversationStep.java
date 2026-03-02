@@ -12,32 +12,47 @@ public enum ConversationStep {
     WAITING_FOR_PHOTO,
     
     /**
-     * Second step - waiting for the user to provide model name or skip
+     * Second step - waiting for the user to provide name or skip
      */
-    WAITING_FOR_MODEL_NAME,
+    WAITING_FOR_NAME,
     
     /**
-     * Third step - waiting for the user to provide description or skip
+     * Third step - waiting for the user to provide brand or skip
      */
-    WAITING_FOR_DESCRIPTION,
+    WAITING_FOR_BRAND,
     
     /**
-     * Fourth step - waiting for the user to provide alternative models or skip
+     * Fourth step - waiting for the user to provide index or skip
+     */
+    WAITING_FOR_INDEX,
+    
+    /**
+     * Fifth step - waiting for the user to provide alternative models or skip
      */
     WAITING_FOR_ALTERNATIVE_MODELS,
     
     /**
-     * Form mode - waiting for model name input
+     * Form mode - waiting for name input
      */
-    FORM_WAITING_MODEL,
+    FORM_WAITING_NAME,
     
     /**
-     * Form mode - waiting for description input
+     * Form mode - waiting for brand input
      */
-    FORM_WAITING_DESC,
+    FORM_WAITING_BRAND,
+    
+    /**
+     * Form mode - waiting for index input
+     */
+    FORM_WAITING_INDEX,
     
     /**
      * Form mode - waiting for alternative models input
      */
-    FORM_WAITING_ALT
+    FORM_WAITING_ALT,
+    
+    /**
+     * Waiting for search query input
+     */
+    WAITING_FOR_SEARCH_QUERY
 }

@@ -49,14 +49,14 @@ public class KnifeBotPropertyTest {
         
         // Симулируем обработку фото
         conversationStateManager.startConversation(userId);
-        ConversationState state = new ConversationState(userId, ConversationStep.WAITING_FOR_MODEL_NAME);
+        ConversationState state = new ConversationState(userId, ConversationStep.WAITING_FOR_NAME);
         state.setPhotoFileId(photoFileId);
         conversationStateManager.updateState(userId, state);
         
         // Проверяем, что состояние создано
         ConversationState savedState = conversationStateManager.getState(userId);
         assertThat(savedState).isNotNull();
-        assertThat(savedState.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_MODEL_NAME);
+        assertThat(savedState.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_NAME);
         assertThat(savedState.getPhotoFileId()).isEqualTo(photoFileId);
     }
     
@@ -107,28 +107,28 @@ public class KnifeBotPropertyTest {
         
         ConversationStateManager conversationStateManager = new ConversationStateManager();
         
-        // Создаем состояние ожидания названия модели
-        ConversationState state = new ConversationState(userId, ConversationStep.WAITING_FOR_MODEL_NAME);
+        // Создаем состояние ожидания названия
+        ConversationState state = new ConversationState(userId, ConversationStep.WAITING_FOR_NAME);
         state.setPhotoFileId("test_file_id");
         conversationStateManager.updateState(userId, state);
         
         // Обрабатываем ввод (текст или /skip)
         if (text.equals("/skip")) {
-            state.setModelName(null);
+            state.setName(null);
         } else {
-            state.setModelName(text);
+            state.setName(text);
         }
-        state.setCurrentStep(ConversationStep.WAITING_FOR_DESCRIPTION);
+        state.setCurrentStep(ConversationStep.WAITING_FOR_BRAND);
         conversationStateManager.updateState(userId, state);
         
         // Проверяем, что состояние обновлено
         ConversationState updatedState = conversationStateManager.getState(userId);
-        assertThat(updatedState.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_DESCRIPTION);
+        assertThat(updatedState.getCurrentStep()).isEqualTo(ConversationStep.WAITING_FOR_BRAND);
         
         if (text.equals("/skip")) {
-            assertThat(updatedState.getModelName()).isNull();
+            assertThat(updatedState.getName()).isNull();
         } else {
-            assertThat(updatedState.getModelName()).isEqualTo(text);
+            assertThat(updatedState.getName()).isEqualTo(text);
         }
     }
     
@@ -150,7 +150,7 @@ public class KnifeBotPropertyTest {
         // Создаем активное состояние диалога
         ConversationState state = new ConversationState(userId, step);
         state.setPhotoFileId("test_file_id");
-        state.setModelName("Test Model");
+        state.setName("Test Model");
         conversationStateManager.updateState(userId, state);
         
         // Проверяем, что состояние существует
@@ -233,8 +233,8 @@ public class KnifeBotPropertyTest {
     Arbitrary<ConversationStep> conversationSteps() {
         return Arbitraries.of(
                 ConversationStep.WAITING_FOR_PHOTO,
-                ConversationStep.WAITING_FOR_MODEL_NAME,
-                ConversationStep.WAITING_FOR_DESCRIPTION
+                ConversationStep.WAITING_FOR_NAME,
+                ConversationStep.WAITING_FOR_BRAND
         );
     }
     
