@@ -76,7 +76,7 @@ public class ModerationApiController {
             SubmissionDto dto = new SubmissionDto();
             dto.setId(submission.getId());
             dto.setName(submission.getName());
-            dto.setBrand(submission.getBrand());
+            dto.setBrand(submission.getBrand() != null ? submission.getBrand().getName() : null);
             dto.setIndexCode(submission.getIndexCode());
             dto.setAlternativeModels(submission.getAlternativeModelsList());
             dto.setPhotoUrl(photoUrl);

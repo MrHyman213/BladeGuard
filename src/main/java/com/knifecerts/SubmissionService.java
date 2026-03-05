@@ -11,12 +11,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.knifecerts.dto.SearchResult;
-import com.knifecerts.model.KnifeModel;
+import com.knifecerts.model.Brand;
 import com.knifecerts.model.Submission;
-import com.knifecerts.model.SubmissionModel;
+import com.knifecerts.model.SubmissionAlternative;
 import com.knifecerts.model.SubmissionStatus;
-import com.knifecerts.repository.KnifeModelRepository;
-import com.knifecerts.repository.SubmissionModelRepository;
+import com.knifecerts.repository.BrandRepository;
+import com.knifecerts.repository.SubmissionAlternativeRepository;
 import com.knifecerts.repository.SubmissionRepository;
 
 /**
@@ -38,8 +38,8 @@ public class SubmissionService {
     
     private final SubmissionRepository submissionRepository;
     private final YandexDiskService yandexDiskService;
-    private final KnifeModelRepository knifeModelRepository;
-    private final SubmissionModelRepository submissionModelRepository;
+    private final BrandRepository brandRepository;
+    private final SubmissionAlternativeRepository submissionAlternativeRepository;
     
     /**
      * Конструктор с внедрением зависимостей.
@@ -51,12 +51,12 @@ public class SubmissionService {
      */
     public SubmissionService(SubmissionRepository submissionRepository, 
                            YandexDiskService yandexDiskService,
-                           KnifeModelRepository knifeModelRepository,
-                           SubmissionModelRepository submissionModelRepository) {
+                           BrandRepository brandRepository,
+                           SubmissionAlternativeRepository submissionAlternativeRepository) {
         this.submissionRepository = submissionRepository;
         this.yandexDiskService = yandexDiskService;
-        this.knifeModelRepository = knifeModelRepository;
-        this.submissionModelRepository = submissionModelRepository;
+        this.brandRepository = brandRepository;
+        this.submissionAlternativeRepository = submissionAlternativeRepository;
     }
     
     /**
@@ -77,15 +77,14 @@ public class SubmissionService {
      */
     public Submission createSubmission(Long userId, String username,
                                       String photoPath, String name,
-                                      String brand, List<String> alternativeModels) {
+                                      String brandName, String indexCode, List<String> alternativeModels) {
         logger.info("Creating new submission for user: " + userId);
 
+        Brand brand = findOrCreateBrand(brandName);
         Submission submission = new Submission(userId, username, name, brand, photoPath);
+        submission.setIndexCode(indexCode);
         submission.setAlternativeModelsList(alternativeModels);
         Submission savedSubmission = submissionRepository.save(submission);
-        
-        // Создаем связи с моделями ножей
-        createKnifeModelLinks(savedSubmission, name, alternativeModels);
 
         logger.info("Submission created with ID: " + savedSubmission.getId());
         return savedSubmission;
@@ -182,14 +181,17 @@ public class SubmissionService {
         
         // Перемещаем файл из offers в certificates
         String sourcePath = submission.getPhotoPath();
+        logger.info("DEBUG: sourcePath from DB = " + sourcePath);
         String fileName = sourcePath.substring(sourcePath.lastIndexOf('/') + 1);
         String destinationPath = "app:/certificates/" + fileName;
+        logger.info("DEBUG: destinationPath = " + destinationPath);
         
         try {
             yandexDiskService.moveFile(sourcePath, destinationPath);
             logger.info("Файл перемещен: " + sourcePath + " -> " + destinationPath);
         } catch (IOException e) {
             logger.severe("Ошибка перемещения файла при одобрении заявки #" + submissionId);
+            logger.severe("DEBUG: Exception details: " + e.getClass().getName() + ": " + e.getMessage());
             throw new SubmissionException(
                 ErrorCode.YANDEX_DISK_MOVE_FAILED,
                 "Не удалось переместить файл: " + e.getMessage()
@@ -278,7 +280,7 @@ public class SubmissionService {
      * @param indexCode новый индекс (может быть null)
      * @param alternativeModels новый список альтернативных моделей (может быть null)
      */
-    public void updateSubmission(Long submissionId, String name, String brand, 
+    public void updateSubmission(Long submissionId, String name, String brandName, 
                                 String indexCode, List<String> alternativeModels) {
         logger.info("Обновление заявки #" + submissionId);
         
@@ -288,7 +290,8 @@ public class SubmissionService {
         if (name != null) {
             submission.setName(name);
         }
-        if (brand != null) {
+        if (brandName != null) {
+            Brand brand = findOrCreateBrand(brandName);
             submission.setBrand(brand);
         }
         if (indexCode != null) {
@@ -299,9 +302,6 @@ public class SubmissionService {
         }
         
         submissionRepository.save(submission);
-        
-        // Обновляем связи с моделями ножей
-        updateKnifeModelLinks(submission, name, alternativeModels);
         
         logger.info("Заявка #" + submissionId + " обновлена");
     }
@@ -372,98 +372,29 @@ public class SubmissionService {
     }
     
     /**
-     * Создает связи между заявкой и моделями ножей.
-     * Проверяет существование связи перед созданием, чтобы избежать дубликатов.
-     * Если связь существует, обновляет флаг is_primary.
+     * Находит или создает бренд по названию.
      * 
-     * @param submission заявка
-     * @param name основное название ножа
-     * @param alternativeModels список альтернативных моделей
+     * @param name название бренда (может быть null)
+     * @return бренд
      */
-    private void createKnifeModelLinks(Submission submission, String name, List<String> alternativeModels) {
-        // Создаем основную модель (primary)
-        if (name != null && !name.trim().isEmpty()) {
-            KnifeModel primaryModel = findOrCreateKnifeModel(name.trim());
-            
-            // Проверяем, есть ли уже такая связь
-            Optional<SubmissionModel> existingLink = submissionModelRepository
-                .findBySubmissionAndKnifeModel(submission, primaryModel);
-            
-            if (existingLink.isPresent()) {
-                // Обновляем is_primary если нужно
-                SubmissionModel link = existingLink.get();
-                if (!link.isPrimary()) {
-                    link.setPrimary(true);
-                    submissionModelRepository.save(link);
-                }
-            } else {
-                // Создаем новую связь
-                SubmissionModel primaryLink = new SubmissionModel(submission, primaryModel, true);
-                submissionModelRepository.save(primaryLink);
-            }
+    private Brand findOrCreateBrand(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            name = "Бренд не указан";
         }
         
-        // Создаем альтернативные модели
-        if (alternativeModels != null && !alternativeModels.isEmpty()) {
-            for (String altName : alternativeModels) {
-                if (altName != null && !altName.trim().isEmpty()) {
-                    KnifeModel altModel = findOrCreateKnifeModel(altName.trim());
-                    
-                    // Проверяем, есть ли уже такая связь
-                    Optional<SubmissionModel> existingLink = submissionModelRepository
-                        .findBySubmissionAndKnifeModel(submission, altModel);
-                    
-                    if (!existingLink.isPresent()) {
-                        // Создаем новую связь только если её нет
-                        SubmissionModel altLink = new SubmissionModel(submission, altModel, false);
-                        submissionModelRepository.save(altLink);
-                    }
-                    // Если связь уже есть, ничего не делаем (оставляем как есть)
-                }
-            }
-        }
-    }
-    
-    /**
-     * Обновляет связи между заявкой и моделями ножей.
-     * Создает новые связи, если их еще нет.
-     * 
-     * @param submission заявка
-     * @param name основное название ножа
-     * @param alternativeModels список альтернативных моделей
-     */
-    private void updateKnifeModelLinks(Submission submission, String name, List<String> alternativeModels) {
-        // Просто создаем связи, метод createKnifeModelLinks сам проверит дубликаты
-        createKnifeModelLinks(submission, name, alternativeModels);
-    }
-    
-    /**
-     * Находит или создает модель ножа по названию.
-     * 
-     * @param name название модели
-     * @return модель ножа
-     */
-    private KnifeModel findOrCreateKnifeModel(String name) {
-        String normalizedName = KnifeModel.normalizeName(name);
-        
-        Optional<KnifeModel> existing = knifeModelRepository.findByNormalizedName(normalizedName);
+        String normalizedName = name.trim();
+        Optional<Brand> existing = brandRepository.findByName(normalizedName);
         if (existing.isPresent()) {
             return existing.get();
         }
         
-        KnifeModel newModel = new KnifeModel(name);
-        return knifeModelRepository.save(newModel);
+        Brand newBrand = new Brand();
+        newBrand.setName(normalizedName);
+        return brandRepository.save(newBrand);
     }
     
     /**
      * Расширенный поиск сертификатов по названию ножа с детальной информацией.
-     * 
-     * Логика поиска:
-     * 1. Нормализует поисковый запрос
-     * 2. Ищет прямое совпадение в knife_models
-     * 3. Если найдена основная модель (is_primary=true), возвращает этот сертификат с альтернативами
-     * 4. Если найдена альтернативная модель (is_primary=false), возвращает все связанные сертификаты
-     * 5. Если не найдено, возвращает пустой список
      * 
      * @param query поисковый запрос (название ножа)
      * @return SearchResult с информацией о типе совпадения
@@ -473,53 +404,16 @@ public class SubmissionService {
             return new SearchResult(new ArrayList<>(), false);
         }
         
-        String normalizedQuery = KnifeModel.normalizeName(query);
-        logger.info("Searching certificates by knife name: " + query + " (normalized: " + normalizedQuery + ")");
+        logger.info("Searching certificates by knife name: " + query);
         
-        // Ищем основную модель
-        List<Submission> primarySubmissions = submissionModelRepository
-            .findPrimarySubmissionByKnifeModelNormalizedName(normalizedQuery);
+        List<Submission> results = submissionRepository.findByStatusAndNameContainingIgnoreCaseOrStatusAndIndexCodeContainingIgnoreCase(
+            SubmissionStatus.APPROVED, query, SubmissionStatus.APPROVED, query);
         
-        if (!primarySubmissions.isEmpty()) {
-            logger.info("Found primary submission(s) for knife model: " + query);
-            return new SearchResult(primarySubmissions, true);
-        }
-        
-        // Если основная не найдена, ищем среди альтернативных
-        List<Submission> alternativeSubmissions = submissionModelRepository
-            .findSubmissionsByKnifeModelNormalizedName(normalizedQuery);
-        
-        if (!alternativeSubmissions.isEmpty()) {
-            logger.info("Found " + alternativeSubmissions.size() + " submission(s) with alternative model: " + query);
-            
-            // Добавляем связанные альтернативы из certificate_alternatives
-            List<Submission> allAlternatives = new ArrayList<>(alternativeSubmissions);
-            for (Submission sub : alternativeSubmissions) {
-                allAlternatives.addAll(sub.getAlternatives());
-            }
-            
-            // Убираем дубликаты
-            List<Submission> uniqueAlternatives = allAlternatives.stream()
-                .distinct()
-                .toList();
-            
-            return new SearchResult(uniqueAlternatives, false);
-        }
-        
-        logger.info("No submissions found for knife model: " + query);
-        return new SearchResult(new ArrayList<>(), false);
+        return new SearchResult(results, !results.isEmpty());
     }
     
     /**
      * Расширенный поиск сертификатов по названию ножа.
-     * 
-     * Логика поиска:
-     * 1. Нормализует поисковый запрос
-     * 2. Ищет прямое совпадение в knife_models
-     * 3. Если найдена основная модель (is_primary=true), возвращает этот сертификат
-     * 4. Если найдена альтернативная модель (is_primary=false), возвращает все сертификаты, 
-     *    связанные с этой моделью
-     * 5. Если не найдено, возвращает пустой список
      * 
      * @param query поисковый запрос (название ножа)
      * @return список найденных сертификатов
@@ -536,19 +430,16 @@ public class SubmissionService {
     public List<String> getAllApprovedBrands() {
         logger.info("Getting all approved brands");
         
-        // Получаем все одобренные сертификаты
         List<Submission> approved = submissionRepository.findByStatus(SubmissionStatus.APPROVED);
         
-        // Собираем все уникальные бренды
         java.util.Set<String> uniqueBrands = new java.util.HashSet<>();
         
         for (Submission submission : approved) {
-            if (submission.getBrand() != null && !submission.getBrand().trim().isEmpty()) {
-                uniqueBrands.add(submission.getBrand().trim());
+            if (submission.getBrand() != null && submission.getBrand().getName() != null) {
+                uniqueBrands.add(submission.getBrand().getName());
             }
         }
         
-        // Сортируем по алфавиту
         List<String> sortedBrands = new ArrayList<>(uniqueBrands);
         java.util.Collections.sort(sortedBrands);
         
@@ -559,27 +450,23 @@ public class SubmissionService {
     /**
      * Получает все уникальные названия ножей конкретного бренда из одобренных сертификатов.
      * 
-     * @param brand название бренда
+     * @param brandName название бренда
      * @return список уникальных названий ножей этого бренда
      */
-    public List<String> getApprovedKnifeNamesByBrand(String brand) {
-        logger.info("Getting approved knife names for brand: " + brand);
+    public List<String> getApprovedKnifeNamesByBrand(String brandName) {
+        logger.info("Getting approved knife names for brand: " + brandName);
         
-        // Получаем все одобренные сертификаты этого бренда
         List<Submission> approved = submissionRepository.findByStatus(SubmissionStatus.APPROVED).stream()
-            .filter(s -> brand.equals(s.getBrand()))
+            .filter(s -> s.getBrand() != null && brandName.equals(s.getBrand().getName()))
             .collect(java.util.stream.Collectors.toList());
         
-        // Собираем все уникальные названия
         java.util.Set<String> uniqueNames = new java.util.HashSet<>();
         
         for (Submission submission : approved) {
-            // Добавляем основное название
             if (submission.getName() != null && !submission.getName().trim().isEmpty()) {
                 uniqueNames.add(submission.getName().trim());
             }
             
-            // Добавляем альтернативные модели
             List<String> altModels = submission.getAlternativeModelsList();
             for (String altModel : altModels) {
                 if (altModel != null && !altModel.trim().isEmpty()) {
@@ -588,11 +475,10 @@ public class SubmissionService {
             }
         }
         
-        // Сортируем по алфавиту
         List<String> sortedNames = new ArrayList<>(uniqueNames);
         java.util.Collections.sort(sortedNames);
         
-        logger.info("Found " + sortedNames.size() + " unique knife names for brand: " + brand);
+        logger.info("Found " + sortedNames.size() + " unique knife names for brand: " + brandName);
         return sortedNames;
     }
     
@@ -653,14 +539,12 @@ public class SubmissionService {
                 continue;
             }
             
-            String normalizedName = KnifeModel.normalizeName(altModelName.trim());
-            
-            // Ищем одобренные сертификаты с таким названием
-            List<Submission> foundCertificates = submissionModelRepository
-                .findPrimarySubmissionByKnifeModelNormalizedName(normalizedName);
+            List<Submission> foundCertificates = submissionRepository
+                .findByStatusAndNameContainingIgnoreCaseOrStatusAndIndexCodeContainingIgnoreCase(
+                    SubmissionStatus.APPROVED, altModelName.trim(), 
+                    SubmissionStatus.APPROVED, altModelName.trim());
             
             for (Submission altCertificate : foundCertificates) {
-                // Не связываем сертификат сам с собой
                 if (!altCertificate.getId().equals(submission.getId())) {
                     submission.addAlternative(altCertificate);
                     logger.info("Связь создана: сертификат #" + submission.getId() + 
@@ -670,5 +554,93 @@ public class SubmissionService {
         }
         
         submissionRepository.save(submission);
+    }
+    
+    public List<Submission> getKnifesByBrand(Brand brand) {
+        logger.info("Getting knives for brand: " + brand.getName());
+        return submissionRepository.findByStatusAndBrand(SubmissionStatus.APPROVED, brand);
+    }
+    
+    public List<Submission> searchKnivesInBrand(Brand brand, String query) {
+        logger.info("Searching knives in brand " + brand.getName() + " with query: " + query);
+        List<Submission> allKnives = getKnifesByBrand(brand);
+        
+        if (query == null || query.trim().isEmpty()) {
+            return allKnives;
+        }
+        
+        String lowerQuery = query.toLowerCase();
+        return allKnives.stream()
+            .filter(s -> (s.getName() != null && s.getName().toLowerCase().contains(lowerQuery)) ||
+                        (s.getIndexCode() != null && s.getIndexCode().toLowerCase().contains(lowerQuery)))
+            .collect(java.util.stream.Collectors.toList());
+    }
+    
+    public List<Submission> getAlternatives(Long submissionId) {
+        logger.info("Getting alternatives for submission #" + submissionId);
+        Submission submission = submissionRepository.findById(submissionId).orElse(null);
+        if (submission == null) {
+            return List.of();
+        }
+        
+        List<Submission> alternatives = submissionAlternativeRepository.findAlternativesBySubmissionId(submissionId);
+        return alternatives.stream()
+            .filter(alt -> alt.getPhotoPath() != null)
+            .collect(java.util.stream.Collectors.toList());
+    }
+    
+    public void addAlternative(Long submissionId, Long alternativeId) {
+        logger.info("Adding alternative: submission #" + submissionId + " <-> #" + alternativeId);
+        
+        Submission submission = submissionRepository.findById(submissionId).orElse(null);
+        Submission alternative = submissionRepository.findById(alternativeId).orElse(null);
+        
+        if (submission == null || alternative == null) {
+            logger.warning("Submission or alternative not found");
+            return;
+        }
+        
+        SubmissionAlternative link1 = new SubmissionAlternative();
+        link1.setSubmission(submission);
+        link1.setAlternative(alternative);
+        submissionAlternativeRepository.save(link1);
+        
+        SubmissionAlternative link2 = new SubmissionAlternative();
+        link2.setSubmission(alternative);
+        link2.setAlternative(submission);
+        submissionAlternativeRepository.save(link2);
+        
+        logger.info("Alternative added");
+    }
+    
+    public void removeAlternative(Long submissionId, Long alternativeId) {
+        logger.info("Removing alternative: submission #" + submissionId + " <-> #" + alternativeId);
+        submissionAlternativeRepository.deleteBySubmissionIdAndAlternativeId(submissionId, alternativeId);
+        submissionAlternativeRepository.deleteBySubmissionIdAndAlternativeId(alternativeId, submissionId);
+        logger.info("Alternative removed");
+    }
+    
+    public List<Submission> getTransitiveAlternatives(Long submissionId) {
+        logger.info("Getting transitive alternatives for submission #" + submissionId);
+        
+        List<Submission> directAlternatives = getAlternatives(submissionId);
+        java.util.Set<Long> allAlternativeIds = new java.util.HashSet<>();
+        
+        for (Submission alt : directAlternatives) {
+            allAlternativeIds.add(alt.getId());
+            List<Submission> transitiveAlts = getAlternatives(alt.getId());
+            for (Submission transAlt : transitiveAlts) {
+                if (!transAlt.getId().equals(submissionId)) {
+                    allAlternativeIds.add(transAlt.getId());
+                }
+            }
+        }
+        
+        allAlternativeIds.remove(submissionId);
+        
+        return allAlternativeIds.stream()
+            .map(id -> submissionRepository.findById(id).orElse(null))
+            .filter(s -> s != null)
+            .collect(java.util.stream.Collectors.toList());
     }
 }

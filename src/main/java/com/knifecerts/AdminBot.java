@@ -6,8 +6,10 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.logging.Logger;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +20,7 @@ import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
@@ -62,6 +65,71 @@ public class AdminBot extends TelegramLongPollingBot {
     // Хранилище состояний поиска для каждого чата
     private final java.util.Map<Long, String> searchStates = new java.util.concurrent.ConcurrentHashMap<>();
     
+    // Хранилище ID сообщений для каждого чата
+    private final java.util.Map<Long, ChatMessages> chatMessages = new java.util.concurrent.ConcurrentHashMap<>();
+    
+    // Хранилище текущего открытого окна для каждого чата
+    private final java.util.Map<Long, String> currentWindow = new java.util.concurrent.ConcurrentHashMap<>();
+    
+    // Журнал ошибок (последние 50)
+    private final java.util.Queue<ErrorLog> errorLogs = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final int MAX_ERROR_LOGS = 50;
+    
+    // Внутренний класс для хранения ID сообщений чата
+    private static class ChatMessages {
+        private Integer mainMenuMessageId;
+        private Integer lastWindowMessageId; // ID последнего сообщения окна
+        private final java.util.Set<Integer> otherMessageIds = new java.util.HashSet<>();
+        private final java.util.List<Integer> recentWindowMessages = new java.util.ArrayList<>(); // Последние сообщения окон
+        
+        public Integer getMainMenuMessageId() { return mainMenuMessageId; }
+        public void setMainMenuMessageId(Integer id) { this.mainMenuMessageId = id; }
+        public Integer getLastWindowMessageId() { return lastWindowMessageId; }
+        public void setLastWindowMessageId(Integer id) { 
+            this.lastWindowMessageId = id;
+            if (id != null) {
+                recentWindowMessages.add(id);
+                System.out.println("DEBUG ChatMessages: Added message " + id + " to list, size now: " + recentWindowMessages.size());
+                // Храним только последние 10
+                if (recentWindowMessages.size() > 10) {
+                    recentWindowMessages.remove(0);
+                }
+            }
+        }
+        public java.util.List<Integer> getRecentWindowMessages() { 
+            System.out.println("DEBUG ChatMessages: getRecentWindowMessages called, size: " + recentWindowMessages.size());
+            return new java.util.ArrayList<>(recentWindowMessages); 
+        }
+        public void clearRecentWindowMessages() { 
+            System.out.println("DEBUG ChatMessages: clearRecentWindowMessages called, was size: " + recentWindowMessages.size());
+            recentWindowMessages.clear(); 
+        }
+        public java.util.Set<Integer> getOtherMessageIds() { return otherMessageIds; }
+        public void addOtherMessageId(Integer id) { 
+            if (id != null && !id.equals(mainMenuMessageId)) {
+                otherMessageIds.add(id); 
+            }
+        }
+        public void clearOtherMessages() { otherMessageIds.clear(); }
+    }
+    
+    // Внутренний класс для журнала ошибок
+    private static class ErrorLog {
+        private final LocalDateTime timestamp;
+        private final String operation;
+        private final String error;
+        
+        public ErrorLog(String operation, String error) {
+            this.timestamp = LocalDateTime.now();
+            this.operation = operation;
+            this.error = error;
+        }
+        
+        public LocalDateTime getTimestamp() { return timestamp; }
+        public String getOperation() { return operation; }
+        public String getError() { return error; }
+    }
+    
     // Внутренний класс для хранения состояния модерации
     private static class ModerationState {
         private final Submission original;
@@ -77,7 +145,7 @@ public class AdminBot extends TelegramLongPollingBot {
         public ModerationState(Submission original) {
             this.original = original;
             this.name = original.getName();
-            this.brand = original.getBrand();
+            this.brand = original.getBrand() != null ? original.getBrand().getName() : null;
             this.indexCode = original.getIndexCode();
             this.alternativeModels = original.getAlternativeModelsList();
             this.isApprovedView = false;
@@ -86,10 +154,25 @@ public class AdminBot extends TelegramLongPollingBot {
         public ModerationState(Submission original, boolean isApprovedView) {
             this.original = original;
             this.name = original.getName();
-            this.brand = original.getBrand();
+            this.brand = original.getBrand() != null ? original.getBrand().getName() : null;
             this.indexCode = original.getIndexCode();
             this.alternativeModels = original.getAlternativeModelsList();
             this.isApprovedView = isApprovedView;
+        }
+        
+        // Проверка были ли изменения
+        public boolean hasChanges() {
+            String originalName = original.getName();
+            String originalBrand = original.getBrand() != null ? original.getBrand().getName() : null;
+            String originalIndex = original.getIndexCode();
+            List<String> originalAlts = original.getAlternativeModelsList();
+            
+            boolean nameChanged = !java.util.Objects.equals(originalName, name);
+            boolean brandChanged = !java.util.Objects.equals(originalBrand, brand);
+            boolean indexChanged = !java.util.Objects.equals(originalIndex, indexCode);
+            boolean altsChanged = !java.util.Objects.equals(originalAlts, alternativeModels);
+            
+            return nameChanged || brandChanged || indexChanged || altsChanged;
         }
         
         public Submission getOriginal() { return original; }
@@ -134,6 +217,15 @@ public class AdminBot extends TelegramLongPollingBot {
                     Long moderatorId = update.getMessage().getFrom().getId();
 
                     if (messageText.equals("/start")) {
+                        // Удаляем команду /start
+                        try {
+                            DeleteMessage deleteMsg = new DeleteMessage();
+                            deleteMsg.setChatId(chatId.toString());
+                            deleteMsg.setMessageId(update.getMessage().getMessageId());
+                            execute(deleteMsg);
+                        } catch (Exception e) {
+                            logger.warning("Failed to delete /start command: " + e.getMessage());
+                        }
                         sendMainMenu(chatId);
                     } else if (messageText.equals("/upload")) {
                         sendMessage(chatId, "Отправьте фото для загрузки на Яндекс.Диск.");
@@ -217,6 +309,11 @@ public class AdminBot extends TelegramLongPollingBot {
         Long moderatorId = callbackQuery.getFrom().getId();
         
         try {
+            // При любой кнопке главного меню - удаляем последние сообщения
+            if (data.startsWith("menu_")) {
+                deleteRecentMessages(chatId, callbackQuery.getMessage().getMessageId());
+            }
+            
             if (data.equals("menu_pending")) {
                 handlePendingCommand(chatId);
             } else if (data.equals("menu_approved")) {
@@ -225,6 +322,32 @@ public class AdminBot extends TelegramLongPollingBot {
                 sendMessage(chatId, "📤 Отправьте фото для загрузки на Яндекс.Диск");
             } else if (data.equals("menu_clearall")) {
                 sendClearConfirmation(chatId);
+            } else if (data.equals("menu_disk_analysis")) {
+                handleDiskAnalysis(chatId);
+            } else if (data.equals("menu_error_log")) {
+                handleErrorLog(chatId);
+            } else if (data.equals("menu_settings")) {
+                handleSettingsCommand(chatId);
+            } else if (data.equals("disk_clean_broken")) {
+                handleCleanBrokenLinks(chatId);
+            } else if (data.equals("disk_clean_orphaned")) {
+                handleCleanOrphanedPhotos(chatId);
+            } else if (data.equals("error_log_clear")) {
+                handleErrorLogClear(chatId);
+            } else if (data.equals("back_to_menu")) {
+                // Просто удаляем сообщение с кнопкой
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(callbackQuery.getMessage().getMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete message: " + e.getMessage());
+                }
+                // Очищаем состояния
+                moderationStates.remove(chatId);
+                searchStates.remove(chatId);
+                currentWindow.remove(chatId);
             } else if (data.equals("confirm_clear_yes")) {
                 handleClearAllCommand(chatId, moderatorId);
             } else if (data.equals("confirm_clear_no")) {
@@ -262,7 +385,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleModApprove(chatId, moderatorId, submissionId);
             } else if (data.startsWith("mod_reject_")) {
                 Long submissionId = Long.parseLong(data.substring(11));
+                handleModRejectRequest(chatId, submissionId);
+            } else if (data.startsWith("confirm_reject_")) {
+                Long submissionId = Long.parseLong(data.substring(15));
                 handleModReject(chatId, moderatorId, submissionId);
+            } else if (data.startsWith("cancel_reject_")) {
+                Long submissionId = Long.parseLong(data.substring(14));
+                handleCancelRejectConfirmation(chatId, submissionId);
             } else if (data.startsWith("mod_cancel_")) {
                 Long submissionId = Long.parseLong(data.substring(11));
                 handleModCancel(chatId, submissionId);
@@ -283,17 +412,41 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleApprovedSearchRequest(chatId);
             } else if (data.equals("approved_reset_search")) {
                 handleApprovedCommand(chatId, 0, null);
+            } else if (data.startsWith("approved_save_confirm_")) {
+                Long submissionId = Long.parseLong(data.substring(22));
+                handleApprovedSaveConfirm(chatId, submissionId);
+            } else if (data.startsWith("approved_save_no_")) {
+                Long submissionId = Long.parseLong(data.substring(17));
+                handleApprovedSaveNo(chatId, submissionId);
             } else if (data.startsWith("approved_save_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 handleApprovedSave(chatId, submissionId);
             } else if (data.startsWith("approved_delete_")) {
                 Long submissionId = Long.parseLong(data.substring(16));
                 handleApprovedDelete(chatId, submissionId);
+            } else if (data.startsWith("approved_cancel_confirm_")) {
+                Long submissionId = Long.parseLong(data.substring(24));
+                handleApprovedCancelConfirm(chatId, submissionId);
+            } else if (data.startsWith("approved_cancel_no_")) {
+                Long submissionId = Long.parseLong(data.substring(19));
+                handleApprovedCancelNo(chatId, submissionId);
             } else if (data.startsWith("approved_cancel_")) {
                 Long submissionId = Long.parseLong(data.substring(16));
                 handleApprovedCancel(chatId, submissionId);
             } else if (data.equals("back_to_menu")) {
-                sendMainMenu(chatId);
+                // Просто удаляем сообщение с кнопкой
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(callbackQuery.getMessage().getMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete message: " + e.getMessage());
+                }
+                // Очищаем состояния
+                moderationStates.remove(chatId);
+                searchStates.remove(chatId);
+                currentWindow.remove(chatId);
             }
             
             AnswerCallbackQuery answer = new AnswerCallbackQuery();
@@ -418,7 +571,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 markup.setKeyboard(keyboard);
                 message.setReplyMarkup(markup);
                 
-                execute(message);
+                executeAndTrack(message);
                 return;
             }
             
@@ -507,7 +660,7 @@ public class AdminBot extends TelegramLongPollingBot {
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
             
-            execute(message);
+            executeAndTrack(message);
             
         } catch (Exception e) {
             logger.severe("Ошибка при получении списка заявок: " + e.getMessage());
@@ -559,7 +712,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 markup.setKeyboard(keyboard);
                 message.setReplyMarkup(markup);
                 
-                execute(message);
+                executeAndTrack(message);
                 return;
             }
             
@@ -673,7 +826,7 @@ public class AdminBot extends TelegramLongPollingBot {
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
             
-            execute(message);
+            executeAndTrack(message);
             
         } catch (Exception e) {
             logger.severe("Ошибка при получении списка одобренных сертификатов: " + e.getMessage());
@@ -744,7 +897,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 sendPhoto.setReplyMarkup(markup);
             }
             
-            execute(sendPhoto);
+            Message sent = execute(sendPhoto);
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setLastWindowMessageId(sent.getMessageId());
             
         } catch (NumberFormatException e) {
             sendMessage(chatId, "❌ Неверный формат ID. Используйте: /view <ID>");
@@ -991,10 +1146,22 @@ public class AdminBot extends TelegramLongPollingBot {
         message.setChatId(chatId.toString());
         message.setText(text);
         try {
-            execute(message);
+            Message sent = execute(message);
+            logger.info("DEBUG: Sent message with ID: " + sent.getMessageId());
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setLastWindowMessageId(sent.getMessageId());
+            logger.info("DEBUG: Saved lastWindowMessageId: " + sent.getMessageId());
         } catch (TelegramApiException e) {
             logger.severe("Error sending message: " + e.getMessage());
         }
+    }
+    
+    private Message executeAndTrack(SendMessage message) throws TelegramApiException {
+        Message sent = execute(message);
+        Long chatId = Long.parseLong(message.getChatId());
+        ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+        messages.setLastWindowMessageId(sent.getMessageId());
+        return sent;
     }
     
     private void sendMainMenu(Long chatId) {
@@ -1032,16 +1199,42 @@ public class AdminBot extends TelegramLongPollingBot {
         // Четвертая строка
         List<InlineKeyboardButton> row4 = new ArrayList<>();
         row4.add(InlineKeyboardButton.builder()
+            .text("🔍 Анализ диска")
+            .callbackData("menu_disk_analysis")
+            .build());
+        keyboard.add(row4);
+        
+        // Пятая строка
+        List<InlineKeyboardButton> row5 = new ArrayList<>();
+        row5.add(InlineKeyboardButton.builder()
+            .text("📋 Журнал ошибок")
+            .callbackData("menu_error_log")
+            .build());
+        keyboard.add(row5);
+        
+        // Шестая строка
+        List<InlineKeyboardButton> row6 = new ArrayList<>();
+        row6.add(InlineKeyboardButton.builder()
+            .text("⚙️ Настройки")
+            .callbackData("menu_settings")
+            .build());
+        keyboard.add(row6);
+        
+        // Седьмая строка
+        List<InlineKeyboardButton> row7 = new ArrayList<>();
+        row7.add(InlineKeyboardButton.builder()
             .text("🗑️ Очистить все данные")
             .callbackData("menu_clearall")
             .build());
-        keyboard.add(row4);
+        keyboard.add(row7);
         
         markup.setKeyboard(keyboard);
         message.setReplyMarkup(markup);
         
         try {
-            execute(message);
+            Message sent = execute(message);
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setMainMenuMessageId(sent.getMessageId());
         } catch (TelegramApiException e) {
             logger.severe("Error sending menu: " + e.getMessage());
         }
@@ -1142,6 +1335,8 @@ public class AdminBot extends TelegramLongPollingBot {
             
             Message sentMessage = execute(sendPhoto);
             state.setFormMessageId(sentMessage.getMessageId());
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setLastWindowMessageId(sentMessage.getMessageId());
             
         } catch (Exception e) {
             logger.severe("Ошибка при отправке формы: " + e.getMessage());
@@ -1276,6 +1471,8 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 Message sentMessage = execute(photoMessage);
                 state.setFormMessageId(sentMessage.getMessageId());
+                ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+                messages.setLastWindowMessageId(sentMessage.getMessageId());
                 
             } catch (Exception e) {
                 logger.warning("Не удалось загрузить фото: " + e.getMessage());
@@ -1353,7 +1550,7 @@ public class AdminBot extends TelegramLongPollingBot {
         // Кнопка отмены
         List<InlineKeyboardButton> row7 = new ArrayList<>();
         row7.add(InlineKeyboardButton.builder()
-            .text("🚫 Отмена")
+            .text("❌ Закрыть")
             .callbackData("approved_cancel_" + submissionId)
             .build());
         keyboard.add(row7);
@@ -1436,7 +1633,7 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionService.updateSubmission(
                 submissionId, 
                 newName, 
-                submission.getBrand(),
+                submission.getBrand() != null ? submission.getBrand().getName() : null,
                 submission.getIndexCode(),
                 submission.getAlternativeModelsList()
             );
@@ -1508,7 +1705,7 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionService.updateSubmission(
                 submissionId,
                 submission.getName(),
-                submission.getBrand(),
+                submission.getBrand() != null ? submission.getBrand().getName() : null,
                 newIndex,
                 submission.getAlternativeModelsList()
             );
@@ -1556,7 +1753,7 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionService.updateSubmission(
                 submissionId,
                 submission.getName(),
-                submission.getBrand(),
+                submission.getBrand() != null ? submission.getBrand().getName() : null,
                 submission.getIndexCode(),
                 altModels
             );
@@ -1685,6 +1882,8 @@ public class AdminBot extends TelegramLongPollingBot {
             
             org.telegram.telegrambots.meta.api.objects.Message sentMessage = execute(message);
             state.setPromptMessageId(sentMessage.getMessageId());
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setLastWindowMessageId(sentMessage.getMessageId());
             
         } catch (Exception e) {
             logger.severe("Ошибка при запросе поля: " + e.getMessage());
@@ -1749,11 +1948,53 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
             }
             
-            // Обновляем форму в зависимости от типа просмотра
-            if (state.isApprovedView()) {
-                sendApprovedSubmissionForm(chatId, state.getOriginal().getId());
-            } else {
-                sendSubmissionForm(chatId, state.getOriginal().getId());
+            // РЕДАКТИРУЕМ существующую форму вместо отправки новой
+            if (state.getFormMessageId() != null) {
+                try {
+                    Submission submission = state.getOriginal();
+                    
+                    // Формируем caption
+                    StringBuilder caption = new StringBuilder();
+                    caption.append("📋 Детали сертификата #").append(submission.getId()).append("\n\n");
+                    caption.append("👤 Пользователь: @").append(submission.getUsername()).append("\n");
+                    caption.append("🔪 Название: ").append(state.getName() != null ? state.getName() : "не указано").append("\n");
+                    caption.append("🏭 Бренд: ").append(state.getBrand() != null ? state.getBrand() : "не указан").append("\n");
+                    caption.append("🔢 Индекс: ").append(state.getIndexCode() != null ? state.getIndexCode() : "не указан").append("\n");
+                    
+                    if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                        caption.append("🔄 Альтернативы: ").append(String.join(", ", state.getAlternativeModels())).append("\n");
+                    }
+                    
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
+                    if (submission.getModeratedAt() != null) {
+                        caption.append("Одобрено: ").append(submission.getModeratedAt().format(formatter));
+                    }
+                    
+                    // Редактируем caption
+                    org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption editCaption = 
+                        new org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption();
+                    editCaption.setChatId(chatId.toString());
+                    editCaption.setMessageId(state.getFormMessageId());
+                    editCaption.setCaption(caption.toString());
+                    
+                    // Обновляем клавиатуру
+                    if (state.isApprovedView()) {
+                        editCaption.setReplyMarkup(buildApprovedFormKeyboard(submission.getId(), state));
+                    } else {
+                        editCaption.setReplyMarkup(buildModFormKeyboard(state, submission.getId(), submission));
+                    }
+                    
+                    execute(editCaption);
+                    
+                } catch (Exception e) {
+                    logger.warning("Не удалось отредактировать форму, отправляем новую: " + e.getMessage());
+                    // Если не удалось отредактировать - отправляем новую
+                    if (state.isApprovedView()) {
+                        sendApprovedSubmissionForm(chatId, state.getOriginal().getId());
+                    } else {
+                        sendSubmissionForm(chatId, state.getOriginal().getId());
+                    }
+                }
             }
             
         } catch (Exception e) {
@@ -1799,7 +2040,58 @@ public class AdminBot extends TelegramLongPollingBot {
             
         } catch (Exception e) {
             logger.severe("Ошибка при одобрении: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при одобрении заявки");
+            logError("Одобрение заявки #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
+        }
+    }
+    
+    private void handleModRejectRequest(Long chatId, Long submissionId) {
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText("❓ Вы уверены, что хотите отклонить заявку #" + submissionId + "?\n\nЗаявка будет удалена без возможности восстановления.");
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        row.add(InlineKeyboardButton.builder()
+            .text("✅ Да, отклонить")
+            .callbackData("confirm_reject_" + submissionId)
+            .build());
+        row.add(InlineKeyboardButton.builder()
+            .text("❌ Отмена")
+            .callbackData("cancel_reject_" + submissionId)
+            .build());
+        keyboard.add(row);
+        
+        markup.setKeyboard(keyboard);
+        message.setReplyMarkup(markup);
+        
+        try {
+            Message sent = execute(message);
+            ModerationState state = moderationStates.get(chatId);
+            if (state != null) {
+                state.setPromptMessageId(sent.getMessageId());
+            }
+            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            messages.setLastWindowMessageId(sent.getMessageId());
+        } catch (TelegramApiException e) {
+            logger.severe("Error sending rejection confirmation: " + e.getMessage());
+        }
+    }
+    
+    private void handleCancelRejectConfirmation(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state != null && state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+                state.setPromptMessageId(null);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation: " + e.getMessage());
+            }
         }
     }
     
@@ -1808,6 +2100,32 @@ public class AdminBot extends TelegramLongPollingBot {
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
+        }
+        
+        // Удаляем сообщение-подтверждение
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+                state.setPromptMessageId(null);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation: " + e.getMessage());
+            }
+        }
+        
+        // Удаляем форму
+        if (state.getFormMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getFormMessageId());
+                execute(deleteMsg);
+                state.setFormMessageId(null);
+            } catch (Exception e) {
+                logger.warning("Failed to delete form: " + e.getMessage());
+            }
         }
         
         try {
@@ -1826,8 +2144,6 @@ public class AdminBot extends TelegramLongPollingBot {
             // Очищаем состояние
             moderationStates.remove(chatId);
             
-            sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
-            
             // Уведомляем пользователя
             try {
                 knifeBot.execute(new SendMessage(submission.getUserId().toString(), 
@@ -1837,11 +2153,10 @@ public class AdminBot extends TelegramLongPollingBot {
                 logger.warning("Не удалось уведомить пользователя: " + e.getMessage());
             }
             
-            sendMainMenu(chatId);
-            
         } catch (Exception e) {
             logger.severe("Ошибка при отклонении: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при отклонении заявки");
+            logError("Отклонение заявки #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отклонении заявки: " + e.getMessage());
         }
     }
     
@@ -1853,11 +2168,72 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedSave(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        // Спрашиваем подтверждение
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText("❓ Вы уверены, что хотите сохранить изменения?");
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        row.add(InlineKeyboardButton.builder()
+            .text("✅ Да, сохранить")
+            .callbackData("approved_save_confirm_" + submissionId)
+            .build());
+        row.add(InlineKeyboardButton.builder()
+            .text("❌ Нет")
+            .callbackData("approved_save_no_" + submissionId)
+            .build());
+        keyboard.add(row);
+        
+        markup.setKeyboard(keyboard);
+        message.setReplyMarkup(markup);
+        
+        try {
+            Message sent = execute(message);
+            state.setPromptMessageId(sent.getMessageId());
+        } catch (Exception e) {
+            logger.severe("Error sending save confirmation: " + e.getMessage());
+        }
+    }
+    
+    private void handleApprovedSaveConfirm(Long chatId, Long submissionId) {
         try {
             ModerationState state = moderationStates.get(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
+            }
+            
+            // Удаляем сообщение-подтверждение
+            if (state.getPromptMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getPromptMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete prompt: " + e.getMessage());
+                }
+            }
+            
+            // Удаляем форму
+            if (state.getFormMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getFormMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete form: " + e.getMessage());
+                }
             }
             
             // Сохраняем изменения
@@ -1870,12 +2246,30 @@ public class AdminBot extends TelegramLongPollingBot {
             );
             
             moderationStates.remove(chatId);
-            sendMessage(chatId, "✅ Изменения сохранены!");
-            handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
             logger.severe("Ошибка при сохранении изменений: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при сохранении изменений");
+        }
+    }
+    
+    private void handleApprovedSaveNo(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            return;
+        }
+        
+        // Просто удаляем сообщение-подтверждение
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+                state.setPromptMessageId(null);
+            } catch (Exception e) {
+                logger.warning("Failed to delete prompt: " + e.getMessage());
+            }
         }
     }
     
@@ -1912,13 +2306,527 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedCancel(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            return;
+        }
+        
+        // Проверяем были ли изменения
+        if (state.hasChanges()) {
+            // Есть изменения - спрашиваем подтверждение
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("❓ Вы уверены, что хотите закрыть редактирование?\n\nИзменения не будут сохранены.");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("✅ Да, закрыть")
+                .callbackData("approved_cancel_confirm_" + submissionId)
+                .build());
+            row.add(InlineKeyboardButton.builder()
+                .text("❌ Нет")
+                .callbackData("approved_cancel_no_" + submissionId)
+                .build());
+            keyboard.add(row);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            try {
+                Message sent = execute(message);
+                state.setPromptMessageId(sent.getMessageId());
+            } catch (Exception e) {
+                logger.severe("Error sending cancel confirmation: " + e.getMessage());
+            }
+        } else {
+            // Нет изменений - просто закрываем
+            handleApprovedCancelConfirm(chatId, submissionId);
+        }
+    }
+    
+    private void handleApprovedCancelConfirm(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        
+        // Удаляем сообщение-подтверждение если есть
+        if (state != null && state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete prompt: " + e.getMessage());
+            }
+        }
+        
+        // Удаляем форму
+        if (state != null && state.getFormMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getFormMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete form: " + e.getMessage());
+            }
+        }
+        
         moderationStates.remove(chatId);
-        sendMessage(chatId, "🚫 Отменено");
-        handleApprovedCommand(chatId, 0);
+    }
+    
+    private void handleApprovedCancelNo(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            return;
+        }
+        
+        // Просто удаляем сообщение-подтверждение
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+                state.setPromptMessageId(null);
+            } catch (Exception e) {
+                logger.warning("Failed to delete prompt: " + e.getMessage());
+            }
+        }
     }
     
     private void handleApprovedSearchRequest(Long chatId) {
         searchStates.put(chatId, "approved");
         sendMessage(chatId, "🔍 Введите название или индекс для поиска:");
+    }
+    
+    private void handleDiskAnalysis(Long chatId) {
+        logger.info("Starting disk analysis for chat: " + chatId);
+        
+        sendMessage(chatId, "🔍 Анализ диска запущен...");
+        
+        try {
+            List<Submission> allSubmissions = submissionService.getAllSubmissions();
+            
+            // Собираем все пути к фото из базы
+            Set<String> usedPhotoPaths = new HashSet<>();
+            int brokenLinks = 0;
+            StringBuilder brokenList = new StringBuilder();
+            
+            for (Submission submission : allSubmissions) {
+                String photoPath = submission.getPhotoPath();
+                if (photoPath == null || photoPath.isEmpty()) {
+                    brokenLinks++;
+                    brokenList.append("❌ #").append(submission.getId())
+                        .append(" - ").append(submission.getDisplayName())
+                        .append(" (путь пустой)\n");
+                    continue;
+                }
+                
+                try {
+                    // Проверяем существование файла на Яндекс.Диске
+                    yandexDiskService.getDownloadUrl(photoPath);
+                    usedPhotoPaths.add(photoPath);
+                } catch (Exception e) {
+                    brokenLinks++;
+                    brokenList.append("❌ #").append(submission.getId())
+                        .append(" - ").append(submission.getDisplayName())
+                        .append("\n   Путь: ").append(photoPath).append("\n");
+                }
+            }
+            
+            // Проверяем неиспользуемые фото на диске
+            int orphanedPhotos = 0;
+            StringBuilder orphanedList = new StringBuilder();
+            
+            try {
+                List<String> allPhotosOnDisk = yandexDiskService.listFiles("app:/certificates");
+                for (String photoPath : allPhotosOnDisk) {
+                    if (!usedPhotoPaths.contains(photoPath)) {
+                        orphanedPhotos++;
+                        String fileName = photoPath.substring(photoPath.lastIndexOf('/') + 1);
+                        orphanedList.append("📄 ").append(fileName).append("\n");
+                    }
+                }
+            } catch (Exception e) {
+                logger.warning("Failed to list photos on disk: " + e.getMessage());
+            }
+            
+            // Формируем отчет
+            StringBuilder report = new StringBuilder();
+            report.append("📊 Результаты анализа диска\n\n");
+            report.append("Всего сертификатов: ").append(allSubmissions.size()).append("\n");
+            report.append("✅ Корректных ссылок: ").append(usedPhotoPaths.size()).append("\n");
+            report.append("❌ Битых ссылок: ").append(brokenLinks).append("\n");
+            report.append("📄 Неиспользуемых фото: ").append(orphanedPhotos).append("\n\n");
+            
+            if (brokenLinks > 0) {
+                report.append("Битые ссылки:\n").append(brokenList.toString()).append("\n");
+            }
+            
+            if (orphanedPhotos > 0) {
+                report.append("Неиспользуемые фото:\n").append(orphanedList.toString());
+            }
+            
+            // Отправляем отчет (разбиваем на части если длинный)
+            String reportText = report.toString();
+            if (reportText.length() > 4000) {
+                int start = 0;
+                while (start < reportText.length()) {
+                    int end = Math.min(start + 4000, reportText.length());
+                    sendMessage(chatId, reportText.substring(start, end));
+                    start = end;
+                }
+            } else {
+                sendMessage(chatId, reportText);
+            }
+            
+            // Добавляем кнопки действий
+            if (brokenLinks > 0 || orphanedPhotos > 0) {
+                SendMessage actionMessage = new SendMessage();
+                actionMessage.setChatId(chatId.toString());
+                actionMessage.setText("Выберите действие:");
+                
+                InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+                List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+                
+                if (brokenLinks > 0) {
+                    List<InlineKeyboardButton> row1 = new ArrayList<>();
+                    row1.add(InlineKeyboardButton.builder()
+                        .text("🗑️ Очистить битые ссылки")
+                        .callbackData("disk_clean_broken")
+                        .build());
+                    keyboard.add(row1);
+                }
+                
+                if (orphanedPhotos > 0) {
+                    List<InlineKeyboardButton> row2 = new ArrayList<>();
+                    row2.add(InlineKeyboardButton.builder()
+                        .text("🗑️ Удалить неиспользуемые фото")
+                        .callbackData("disk_clean_orphaned")
+                        .build());
+                    keyboard.add(row2);
+                }
+                
+                List<InlineKeyboardButton> row3 = new ArrayList<>();
+                row3.add(InlineKeyboardButton.builder()
+                    .text("🔙 Главное меню")
+                    .callbackData("back_to_menu")
+                    .build());
+                keyboard.add(row3);
+                
+                markup.setKeyboard(keyboard);
+                actionMessage.setReplyMarkup(markup);
+                
+                execute(actionMessage);
+            } else {
+                sendMainMenu(chatId);
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Error during disk analysis: " + e.getMessage());
+            logError("Анализ диска", e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при анализе диска: " + e.getMessage());
+        }
+    }
+    
+    private void handleCleanBrokenLinks(Long chatId) {
+        logger.info("Cleaning broken links for chat: " + chatId);
+        
+        try {
+            List<Submission> allSubmissions = submissionService.getAllSubmissions();
+            int deletedCount = 0;
+            
+            for (Submission submission : allSubmissions) {
+                String photoPath = submission.getPhotoPath();
+                if (photoPath == null || photoPath.isEmpty()) {
+                    submissionService.deleteSubmission(submission.getId());
+                    deletedCount++;
+                    continue;
+                }
+                
+                try {
+                    yandexDiskService.getDownloadUrl(photoPath);
+                } catch (Exception e) {
+                    submissionService.deleteSubmission(submission.getId());
+                    deletedCount++;
+                }
+            }
+            
+            sendMessage(chatId, "✅ Удалено сертификатов с битыми ссылками: " + deletedCount);
+            sendMainMenu(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Error cleaning broken links: " + e.getMessage());
+            logError("Очистка битых ссылок", e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при очистке: " + e.getMessage());
+        }
+    }
+    
+    private void handleCleanOrphanedPhotos(Long chatId) {
+        logger.info("Cleaning orphaned photos for chat: " + chatId);
+        
+        try {
+            List<Submission> allSubmissions = submissionService.getAllSubmissions();
+            Set<String> usedPhotoPaths = new HashSet<>();
+            
+            for (Submission submission : allSubmissions) {
+                String photoPath = submission.getPhotoPath();
+                if (photoPath != null && !photoPath.isEmpty()) {
+                    usedPhotoPaths.add(photoPath);
+                }
+            }
+            
+            List<String> allPhotosOnDisk = yandexDiskService.listFiles("app:/certificates");
+            int deletedCount = 0;
+            
+            for (String photoPath : allPhotosOnDisk) {
+                if (!usedPhotoPaths.contains(photoPath)) {
+                    yandexDiskService.deleteFile(photoPath);
+                    deletedCount++;
+                }
+            }
+            
+            sendMessage(chatId, "✅ Удалено неиспользуемых фото: " + deletedCount);
+            sendMainMenu(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Error cleaning orphaned photos: " + e.getMessage());
+            logError("Очистка неиспользуемых фото", e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при очистке: " + e.getMessage());
+        }
+    }
+    
+    private void logError(String operation, String error) {
+        errorLogs.add(new ErrorLog(operation, error));
+        while (errorLogs.size() > MAX_ERROR_LOGS) {
+            errorLogs.poll();
+        }
+    }
+    
+    private void handleErrorLog(Long chatId) {
+        logger.info("Showing error log for chat: " + chatId);
+        
+        if (errorLogs.isEmpty()) {
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("📋 Журнал ошибок пуст");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(row);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            try {
+                execute(message);
+            } catch (TelegramApiException e) {
+                logger.severe("Error sending empty log message: " + e.getMessage());
+            }
+            return;
+        }
+        
+        StringBuilder logText = new StringBuilder();
+        logText.append("📋 Журнал ошибок (последние ").append(errorLogs.size()).append(")\n\n");
+        
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM HH:mm:ss");
+        
+        int count = 0;
+        for (ErrorLog log : errorLogs) {
+            count++;
+            logText.append(count).append(". ")
+                .append(log.getTimestamp().format(formatter))
+                .append("\n   ").append(log.getOperation())
+                .append("\n   ❌ ").append(log.getError())
+                .append("\n\n");
+        }
+        
+        // Отправляем по частям если длинный
+        String fullLog = logText.toString();
+        if (fullLog.length() > 4000) {
+            int start = 0;
+            while (start < fullLog.length()) {
+                int end = Math.min(start + 4000, fullLog.length());
+                sendMessage(chatId, fullLog.substring(start, end));
+                start = end;
+            }
+        } else {
+            sendMessage(chatId, fullLog);
+        }
+        
+        // Кнопки действий
+        SendMessage actionMessage = new SendMessage();
+        actionMessage.setChatId(chatId.toString());
+        actionMessage.setText("Выберите действие:");
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        List<InlineKeyboardButton> row1 = new ArrayList<>();
+        row1.add(InlineKeyboardButton.builder()
+            .text("🗑️ Очистить журнал")
+            .callbackData("error_log_clear")
+            .build());
+        keyboard.add(row1);
+        
+        List<InlineKeyboardButton> row2 = new ArrayList<>();
+        row2.add(InlineKeyboardButton.builder()
+            .text("🔙 Главное меню")
+            .callbackData("back_to_menu")
+            .build());
+        keyboard.add(row2);
+        
+        markup.setKeyboard(keyboard);
+        actionMessage.setReplyMarkup(markup);
+        
+        try {
+            execute(actionMessage);
+        } catch (TelegramApiException e) {
+            logger.severe("Error sending action message: " + e.getMessage());
+        }
+    }
+    
+    private void handleErrorLogClear(Long chatId) {
+        logger.info("Clearing error log for chat: " + chatId);
+        errorLogs.clear();
+        sendMessage(chatId, "✅ Журнал ошибок очищен");
+        sendMainMenu(chatId);
+    }
+    
+    private void deleteAllMessagesExceptMenu(Long chatId) {
+        ChatMessages messages = chatMessages.get(chatId);
+        if (messages == null) {
+            // Если нет записей, просто очищаем состояния
+            moderationStates.remove(chatId);
+            searchStates.remove(chatId);
+            return;
+        }
+        
+        // Удаляем сообщения из ModerationState
+        ModerationState modState = moderationStates.get(chatId);
+        if (modState != null) {
+            if (modState.getFormMessageId() != null) {
+                deleteMessage(chatId, modState.getFormMessageId());
+            }
+            if (modState.getPromptMessageId() != null) {
+                deleteMessage(chatId, modState.getPromptMessageId());
+            }
+        }
+        
+        // Удаляем все отслеживаемые сообщения КРОМЕ главного меню
+        for (Integer messageId : messages.getOtherMessageIds()) {
+            deleteMessage(chatId, messageId);
+        }
+        
+        // Очищаем список и состояния
+        messages.clearOtherMessages();
+        moderationStates.remove(chatId);
+        searchStates.remove(chatId);
+    }
+    
+    private void closeCurrentWindow(Long chatId) {
+        logger.info("DEBUG: closeCurrentWindow called for chat " + chatId);
+        ChatMessages messages = chatMessages.get(chatId);
+        if (messages == null) {
+            logger.info("DEBUG: No messages found for chat " + chatId);
+            return;
+        }
+        
+        // Удаляем последнее сообщение окна
+        if (messages.getLastWindowMessageId() != null) {
+            logger.info("DEBUG: Deleting lastWindowMessageId: " + messages.getLastWindowMessageId());
+            deleteMessage(chatId, messages.getLastWindowMessageId());
+            messages.setLastWindowMessageId(null);
+        } else {
+            logger.info("DEBUG: No lastWindowMessageId to delete");
+        }
+        
+        // Удаляем сообщения из ModerationState
+        ModerationState modState = moderationStates.get(chatId);
+        if (modState != null) {
+            if (modState.getFormMessageId() != null) {
+                logger.info("DEBUG: Deleting formMessageId: " + modState.getFormMessageId());
+                deleteMessage(chatId, modState.getFormMessageId());
+            }
+            if (modState.getPromptMessageId() != null) {
+                logger.info("DEBUG: Deleting promptMessageId: " + modState.getPromptMessageId());
+                deleteMessage(chatId, modState.getPromptMessageId());
+            }
+        }
+        
+        // Удаляем все отслеживаемые сообщения
+        for (Integer messageId : messages.getOtherMessageIds()) {
+            logger.info("DEBUG: Deleting otherMessageId: " + messageId);
+            deleteMessage(chatId, messageId);
+        }
+        
+        // Очищаем список и состояния
+        messages.clearOtherMessages();
+        moderationStates.remove(chatId);
+        searchStates.remove(chatId);
+        currentWindow.remove(chatId);
+        logger.info("DEBUG: closeCurrentWindow completed");
+    }
+    
+    private void deleteRecentMessages(Long chatId, Integer menuMessageId) {
+        logger.info("DEBUG: deleteRecentMessages called for chat " + chatId);
+        ChatMessages messages = chatMessages.get(chatId);
+        if (messages == null) {
+            logger.info("DEBUG: No messages object found");
+            return;
+        }
+        
+        java.util.List<Integer> toDelete = messages.getRecentWindowMessages();
+        logger.info("DEBUG: Found " + toDelete.size() + " messages to delete");
+        
+        // Удаляем все недавние сообщения окон
+        int deletedCount = 0;
+        for (Integer msgId : toDelete) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(msgId);
+                execute(deleteMsg);
+                deletedCount++;
+                logger.info("DEBUG: Deleted message " + msgId);
+            } catch (Exception e) {
+                logger.info("DEBUG: Failed to delete message " + msgId + ": " + e.getMessage());
+            }
+        }
+        
+        // Очищаем список ПОСЛЕ удаления
+        messages.clearRecentWindowMessages();
+        logger.info("DEBUG: Deleted " + deletedCount + " messages, cleared list");
+        
+        // Очищаем состояния
+        moderationStates.remove(chatId);
+        searchStates.remove(chatId);
+        currentWindow.remove(chatId);
+    }
+    
+    private void deleteMessage(Long chatId, Integer messageId) {
+        if (messageId == null) return;
+        try {
+            DeleteMessage deleteMessage = new DeleteMessage();
+            deleteMessage.setChatId(chatId.toString());
+            deleteMessage.setMessageId(messageId);
+            execute(deleteMessage);
+        } catch (Exception e) {
+            // Игнорируем ошибки удаления (сообщение может быть уже удалено)
+        }
+    }
+    
+    private void handleSettingsCommand(Long chatId) {
+        sendMessage(chatId, "⚙️ Настройки пока не реализованы");
+        sendMainMenu(chatId);
     }
 }

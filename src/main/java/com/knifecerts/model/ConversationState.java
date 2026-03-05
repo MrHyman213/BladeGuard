@@ -71,6 +71,38 @@ public class ConversationState {
     private Integer promptMessageId;
     
     /**
+     * ID главного меню.
+     * Используется для удаления всех сообщений кроме главного меню.
+     */
+    private Integer mainMenuMessageId;
+    
+    /**
+     * ID текущего сообщения со списком (брендов или моделей).
+     */
+    private Integer currentListMessageId;
+    
+    /**
+     * ID текущего сообщения с сертификатом.
+     */
+    private Integer currentCertificateMessageId;
+    
+    /**
+     * ID сообщения об успешной отправке заявки.
+     * Удаляется при следующем действии пользователя.
+     */
+    private Integer successMessageId;
+    
+    /**
+     * Текущая страница пагинации.
+     */
+    private Integer currentPage;
+    
+    /**
+     * Текущий выбранный бренд (для навигации).
+     */
+    private String currentBrand;
+    
+    /**
      * Конструктор по умолчанию.
      */
     public ConversationState() {
@@ -167,5 +199,81 @@ public class ConversationState {
     
     public void setPromptMessageId(Integer promptMessageId) {
         this.promptMessageId = promptMessageId;
+    }
+    
+    public Integer getMainMenuMessageId() {
+        return mainMenuMessageId;
+    }
+    
+    public void setMainMenuMessageId(Integer mainMenuMessageId) {
+        this.mainMenuMessageId = mainMenuMessageId;
+    }
+    
+    public Integer getCurrentListMessageId() {
+        return currentListMessageId;
+    }
+    
+    public void setCurrentListMessageId(Integer currentListMessageId) {
+        this.currentListMessageId = currentListMessageId;
+    }
+    
+    public Integer getCurrentCertificateMessageId() {
+        return currentCertificateMessageId;
+    }
+    
+    public void setCurrentCertificateMessageId(Integer currentCertificateMessageId) {
+        this.currentCertificateMessageId = currentCertificateMessageId;
+    }
+    
+    public Integer getCurrentPage() {
+        return currentPage != null ? currentPage : 0;
+    }
+    
+    public void setCurrentPage(Integer currentPage) {
+        this.currentPage = currentPage;
+    }
+    
+    public String getCurrentBrand() {
+        return currentBrand;
+    }
+    
+    public void setCurrentBrand(String currentBrand) {
+        this.currentBrand = currentBrand;
+    }
+    
+    public Integer getSuccessMessageId() {
+        return successMessageId;
+    }
+    
+    public void setSuccessMessageId(Integer successMessageId) {
+        this.successMessageId = successMessageId;
+    }
+
+
+    /**
+     * Получает список альтернатив (алиас для alternativeModels).
+     */
+    public List<String> getAlternatives() {
+        return alternativeModels;
+    }
+
+    /**
+     * Устанавливает список альтернатив (алиас для alternativeModels).
+     */
+    public void setAlternatives(List<String> alternatives) {
+        this.alternativeModels = alternatives;
+    }
+
+    /**
+     * Очищает данные формы.
+     */
+    public void clearFormData() {
+        this.photoFileId = null;
+        this.name = null;
+        this.brand = null;
+        this.indexCode = null;
+        this.alternativeModels = null;
+        this.formMessageId = null;
+        this.promptMessageId = null;
     }
 }

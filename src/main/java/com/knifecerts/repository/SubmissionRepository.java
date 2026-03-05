@@ -75,4 +75,6 @@ public interface SubmissionRepository extends JpaRepository<Submission, Long> {
      */
     List<Submission> findByStatusAndNameContainingIgnoreCaseOrStatusAndIndexCodeContainingIgnoreCase(
         SubmissionStatus status1, String name, SubmissionStatus status2, String indexCode);
+    
+    List<Submission> findByStatusAndBrand(SubmissionStatus status, com.knifecerts.model.Brand brand);
 }

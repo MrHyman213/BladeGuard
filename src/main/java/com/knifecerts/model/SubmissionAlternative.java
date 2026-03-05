@@ -11,13 +11,9 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 
-/**
- * Entity для связи между заявками и моделями ножей (junction table).
- * Реализует отношение многие-ко-многим между Submission и KnifeModel.
- */
 @Entity
-@Table(name = "submission_models")
-public class SubmissionModel {
+@Table(name = "submission_alternatives")
+public class SubmissionAlternative {
     
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -28,27 +24,21 @@ public class SubmissionModel {
     private Submission submission;
     
     @ManyToOne
-    @JoinColumn(name = "knife_model_id", nullable = false)
-    private KnifeModel knifeModel;
-    
-    @Column(name = "is_primary", nullable = false)
-    private boolean isPrimary;
+    @JoinColumn(name = "alternative_id", nullable = false)
+    private Submission alternative;
     
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
     
-    public SubmissionModel() {
+    public SubmissionAlternative() {
         this.createdAt = LocalDateTime.now();
     }
     
-    public SubmissionModel(Submission submission, KnifeModel knifeModel, boolean isPrimary) {
+    public SubmissionAlternative(Submission submission, Submission alternative) {
         this();
         this.submission = submission;
-        this.knifeModel = knifeModel;
-        this.isPrimary = isPrimary;
+        this.alternative = alternative;
     }
-    
-    // Getters and Setters
     
     public Long getId() {
         return id;
@@ -66,20 +56,12 @@ public class SubmissionModel {
         this.submission = submission;
     }
     
-    public KnifeModel getKnifeModel() {
-        return knifeModel;
+    public Submission getAlternative() {
+        return alternative;
     }
     
-    public void setKnifeModel(KnifeModel knifeModel) {
-        this.knifeModel = knifeModel;
-    }
-    
-    public boolean isPrimary() {
-        return isPrimary;
-    }
-    
-    public void setPrimary(boolean primary) {
-        isPrimary = primary;
+    public void setAlternative(Submission alternative) {
+        this.alternative = alternative;
     }
     
     public LocalDateTime getCreatedAt() {

@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Logger;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -323,6 +325,8 @@ public class YandexDiskService {
      * @throws IOException если операция перемещения не удалась
      */
     public void moveFile(String sourcePath, String destinationPath) throws IOException {
+        logger.info("DEBUG: Attempting to move file from: " + sourcePath + " to: " + destinationPath);
+        
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources/move")
                 .queryParam("from", sourcePath)
@@ -330,6 +334,8 @@ public class YandexDiskService {
                 .queryParam("overwrite", "false")
                 .build()
                 .toUriString();
+        
+        logger.info("DEBUG: Move URL: " + url);
         
         HttpHeaders headers = new HttpHeaders();
         headers.set("Authorization", "OAuth " + getCleanToken());
@@ -341,6 +347,10 @@ public class YandexDiskService {
             logger.info("Файл успешно перемещен: " + sourcePath + " -> " + destinationPath);
         } catch (Exception e) {
             logger.severe("Не удалось переместить файл: " + e.getMessage());
+            logger.severe("DEBUG: Full exception: " + e.getClass().getName());
+            if (e.getCause() != null) {
+                logger.severe("DEBUG: Cause: " + e.getCause().getMessage());
+            }
             throw new IOException("Ошибка перемещения файла на Yandex.Disk", e);
         }
     }
@@ -445,6 +455,52 @@ public class YandexDiskService {
         } catch (Exception e) {
             logger.severe("Ошибка при очистке папки: " + e.getMessage());
             throw new IOException("Ошибка очистки папки", e);
+        }
+    }
+    
+    /**
+     * Получает список файлов в указанной папке на Yandex.Disk
+     * 
+     * @param folderPath путь к папке (например, "app:/certificates")
+     * @return список полных путей к файлам
+     * @throws IOException если операция не удалась
+     */
+    public List<String> listFiles(String folderPath) throws IOException {
+        String url = UriComponentsBuilder
+                .fromHttpUrl("https://cloud-api.yandex.net/v1/disk/resources")
+                .queryParam("path", folderPath)
+                .queryParam("limit", "1000")
+                .build()
+                .toUriString();
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "OAuth " + getCleanToken());
+        
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+            List<String> filePaths = new ArrayList<>();
+            
+            // Парсим JSON ответ для получения списка файлов
+            String responseBody = response.getBody();
+            if (responseBody != null && responseBody.contains("\"items\"")) {
+                // Простой парсинг JSON для получения путей файлов
+                String[] items = responseBody.split("\"path\":");
+                for (int i = 1; i < items.length; i++) {
+                    String pathPart = items[i].split(",")[0].trim();
+                    pathPart = pathPart.replace("\"", "");
+                    if (pathPart.startsWith("disk:") || pathPart.startsWith("app:")) {
+                        filePaths.add(pathPart);
+                    }
+                }
+            }
+            
+            logger.info("Найдено файлов в " + folderPath + ": " + filePaths.size());
+            return filePaths;
+        } catch (Exception e) {
+            logger.warning("Не удалось получить список файлов: " + e.getMessage());
+            throw new IOException("Ошибка получения списка файлов с Yandex.Disk", e);
         }
     }
 }

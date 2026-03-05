@@ -1,0 +1,364 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-1-create-brands-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: brands
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+        - insert:
+            tableName: brands
+            columns:
+              - column:
+                  name: name
+                  value: "Бренд не указан"
+
+  - changeSet:
+      id: 001-2-create-submissions-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: submissions
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: user_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: username
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+              - column:
+                  name: brand_id
+                  type: BIGINT
+                  defaultValue: 1
+                  constraints:
+                    foreignKeyName: fk_submissions_brand
+                    references: brands(id)
+              - column:
+                  name: index_code
+                  type: VARCHAR(100)
+              - column:
+                  name: photo_path
+                  type: VARCHAR(500)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: status
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: moderated_at
+                  type: TIMESTAMP
+              - column:
+                  name: moderated_by
+                  type: BIGINT
+              - column:
+                  name: rejection_reason
+                  type: TEXT
+              - column:
+                  name: alternative_models
+                  type: TEXT
+        - sql:
+            sql: ALTER TABLE submissions ADD CONSTRAINT chk_name_or_index CHECK (name IS NOT NULL OR index_code IS NOT NULL)
+
+  - changeSet:
+      id: 001-3-create-submission-alternatives-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: submission_alternatives
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: submission_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_submission_alternatives_submission
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: alternative_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_submission_alternatives_alternative
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+        - addUniqueConstraint:
+            tableName: submission_alternatives
+            columnNames: submission_id, alternative_id
+            constraintName: uk_submission_alternatives
+        - sql:
+            sql: ALTER TABLE submission_alternatives ADD CONSTRAINT chk_not_self_alternative CHECK (submission_id != alternative_id)
+        - createIndex:
+            tableName: submission_alternatives
+            indexName: idx_submission_alternatives_submission
+            columns:
+              - column:
+                  name: submission_id
+        - createIndex:
+            tableName: submission_alternatives
+            indexName: idx_submission_alternatives_alternative
+            columns:
+              - column:
+                  name: alternative_id
+
+  - changeSet:
+      id: 001-4-create-pending-alternatives-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: pending_alternatives
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: submission_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_pending_alternatives_submission
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: brand_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: knife_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 001-5-create-photo-history-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: photo_history
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: submission_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_photo_history_submission
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: old_path
+                  type: VARCHAR(500)
+              - column:
+                  name: new_path
+                  type: VARCHAR(500)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: replaced_by
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: replaced_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: reason
+                  type: TEXT
+
+  - changeSet:
+      id: 001-6-create-bot-settings-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: bot_settings
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: setting_key
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: setting_value
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: updated_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+        - insert:
+            tableName: bot_settings
+            columns:
+              - column:
+                  name: setting_key
+                  value: "alternative_separator"
+              - column:
+                  name: setting_value
+                  value: "/"
+
+  - changeSet:
+      id: 001-7-create-moderation-sessions-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: moderation_sessions
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: token
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: moderator_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: submission_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_moderation_sessions_submission
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: message_id
+                  type: INTEGER
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: expires_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: used
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        - createIndex:
+            tableName: moderation_sessions
+            indexName: idx_moderation_sessions_moderator
+            columns:
+              - column:
+                  name: moderator_id
+
+  - changeSet:
+      id: 001-8-create-certificate-alternatives-table
+      author: kiro
+      changes:
+        - createTable:
+            tableName: certificate_alternatives
+            columns:
+              - column:
+                  name: certificate_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_certificate_alternatives_certificate
+                    references: submissions(id)
+                    deleteCascade: true
+              - column:
+                  name: alternative_certificate_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_certificate_alternatives_alternative
+                    references: submissions(id)
+                    deleteCascade: true
+        - addPrimaryKey:
+            tableName: certificate_alternatives
+            columnNames: certificate_id, alternative_certificate_id
+            constraintName: pk_certificate_alternatives
