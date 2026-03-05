@@ -13,10 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.knifecerts.dto.SearchResult;
 import com.knifecerts.model.Brand;
 import com.knifecerts.model.Submission;
-import com.knifecerts.model.SubmissionAlternative;
 import com.knifecerts.model.SubmissionStatus;
 import com.knifecerts.repository.BrandRepository;
-import com.knifecerts.repository.SubmissionAlternativeRepository;
 import com.knifecerts.repository.SubmissionRepository;
 
 /**
@@ -39,24 +37,20 @@ public class SubmissionService {
     private final SubmissionRepository submissionRepository;
     private final YandexDiskService yandexDiskService;
     private final BrandRepository brandRepository;
-    private final SubmissionAlternativeRepository submissionAlternativeRepository;
     
     /**
      * Конструктор с внедрением зависимостей.
      * 
      * @param submissionRepository репозиторий для работы с заявками
      * @param yandexDiskService сервис для работы с Yandex.Disk
-     * @param knifeModelRepository репозиторий для работы с моделями ножей
-     * @param submissionModelRepository репозиторий для работы со связями
+     * @param brandRepository репозиторий для работы с брендами
      */
     public SubmissionService(SubmissionRepository submissionRepository, 
                            YandexDiskService yandexDiskService,
-                           BrandRepository brandRepository,
-                           SubmissionAlternativeRepository submissionAlternativeRepository) {
+                           BrandRepository brandRepository) {
         this.submissionRepository = submissionRepository;
         this.yandexDiskService = yandexDiskService;
         this.brandRepository = brandRepository;
-        this.submissionAlternativeRepository = submissionAlternativeRepository;
     }
     
     /**
@@ -311,15 +305,14 @@ public class SubmissionService {
      * 
      * @param submissionId ID заявки
      * @param moderatorId ID модератора
-     * @param reason причина отклонения
+     * @param reason причина отклонения (не сохраняется в БД)
      * @return отклоненная заявка
      * @throws SubmissionException если заявка не найдена или уже проверена
      */
     public Submission rejectSubmissionWithReason(Long submissionId, Long moderatorId, String reason) 
             throws SubmissionException {
-        Submission submission = rejectSubmission(submissionId, moderatorId);
-        submission.setRejectionReason(reason);
-        return submissionRepository.save(submission);
+        // Причина отклонения больше не сохраняется в БД
+        return rejectSubmission(submissionId, moderatorId);
     }
     
     public List<Submission> getApprovedSubmissions() {
@@ -583,10 +576,8 @@ public class SubmissionService {
             return List.of();
         }
         
-        List<Submission> alternatives = submissionAlternativeRepository.findAlternativesBySubmissionId(submissionId);
-        return alternatives.stream()
-            .filter(alt -> alt.getPhotoPath() != null)
-            .collect(java.util.stream.Collectors.toList());
+        // Используем ManyToMany relationship
+        return new ArrayList<>(submission.getAlternatives());
     }
     
     public void addAlternative(Long submissionId, Long alternativeId) {
@@ -600,23 +591,28 @@ public class SubmissionService {
             return;
         }
         
-        SubmissionAlternative link1 = new SubmissionAlternative();
-        link1.setSubmission(submission);
-        link1.setAlternative(alternative);
-        submissionAlternativeRepository.save(link1);
-        
-        SubmissionAlternative link2 = new SubmissionAlternative();
-        link2.setSubmission(alternative);
-        link2.setAlternative(submission);
-        submissionAlternativeRepository.save(link2);
+        // Используем ManyToMany relationship
+        submission.addAlternative(alternative);
+        submissionRepository.save(submission);
         
         logger.info("Alternative added");
     }
     
     public void removeAlternative(Long submissionId, Long alternativeId) {
         logger.info("Removing alternative: submission #" + submissionId + " <-> #" + alternativeId);
-        submissionAlternativeRepository.deleteBySubmissionIdAndAlternativeId(submissionId, alternativeId);
-        submissionAlternativeRepository.deleteBySubmissionIdAndAlternativeId(alternativeId, submissionId);
+        
+        Submission submission = submissionRepository.findById(submissionId).orElse(null);
+        Submission alternative = submissionRepository.findById(alternativeId).orElse(null);
+        
+        if (submission == null || alternative == null) {
+            logger.warning("Submission or alternative not found");
+            return;
+        }
+        
+        // Используем ManyToMany relationship
+        submission.removeAlternative(alternative);
+        submissionRepository.save(submission);
+        
         logger.info("Alternative removed");
     }
     

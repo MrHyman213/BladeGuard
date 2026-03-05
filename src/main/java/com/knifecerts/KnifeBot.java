@@ -47,11 +47,8 @@ public class KnifeBot extends TelegramLongPollingBot {
     @Autowired
     private BrandService brandService;
     
-    @Autowired
-    private BotSettingsService botSettingsService;
-    
-    @Autowired
-    private PendingAlternativeService pendingAlternativeService;
+    // Константа для разделителя альтернативных моделей
+    private static final String ALTERNATIVE_SEPARATOR = "/";
 
     @Autowired
     private ConversationStateManager conversationStateManager;
@@ -650,7 +647,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             if (!alternatives.isEmpty()) {
-                String separator = botSettingsService.getSeparator();
+                String separator = ALTERNATIVE_SEPARATOR;
                 List<InlineKeyboardButton> separatorRow = new ArrayList<>();
                 separatorRow.add(InlineKeyboardButton.builder()
                     .text("──── " + separator + " Альтернативы " + separator + " ────")
@@ -920,7 +917,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             deleteAllExceptMainMenu(userId, chatId);
             
-            String separator = botSettingsService.getSeparator();
+            String separator = ALTERNATIVE_SEPARATOR;
             SendMessage helpMessage = new SendMessage();
             helpMessage.setChatId(chatId.toString());
             helpMessage.setText("📤 Загрузка сертификата\n\n" +
@@ -1017,7 +1014,7 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
 
     private void parseTemplate(ConversationState state, String caption) {
-        String separator = botSettingsService.getSeparator();
+        String separator = ALTERNATIVE_SEPARATOR;
         String[] parts = caption.split(java.util.regex.Pattern.quote(separator));
         
         if (parts.length >= 1) {
@@ -1282,7 +1279,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             state.setPromptMessageId(null);
         }
         
-        String separator = botSettingsService.getSeparator();
+        String separator = ALTERNATIVE_SEPARATOR;
         state.setCurrentStep(ConversationStep.FORM_WAITING_ALT);
         
         try {
@@ -1356,15 +1353,8 @@ public class KnifeBot extends TelegramLongPollingBot {
                 state.getAlternatives()
             );
             
-            if (state.getAlternatives() != null && !state.getAlternatives().isEmpty()) {
-                for (String alt : state.getAlternatives()) {
-                    pendingAlternativeService.savePendingAlternative(
-                        submission,
-                        state.getBrand(),
-                        alt
-                    );
-                }
-            }
+            // Альтернативные модели уже сохранены в submission.alternativeModels (JSON)
+            // PendingAlternativeService больше не используется
             
             // Удаляем форму
             if (state.getFormMessageId() != null) {

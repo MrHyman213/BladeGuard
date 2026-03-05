@@ -9,7 +9,6 @@ import java.util.Set;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -21,7 +20,6 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.JoinTable;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.ManyToOne;
-import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 
@@ -65,14 +63,8 @@ public class Submission {
     @Column(name = "moderated_by")
     private Long moderatedBy;
     
-    @Column(name = "rejection_reason", columnDefinition = "TEXT")
-    private String rejectionReason;
-    
     @Column(name = "alternative_models", columnDefinition = "TEXT")
     private String alternativeModels;
-    
-    @OneToMany(mappedBy = "submission", cascade = CascadeType.ALL, orphanRemoval = true)
-    private Set<SubmissionAlternative> submissionAlternatives = new HashSet<>();
     
     @ManyToMany
     @JoinTable(
@@ -186,14 +178,6 @@ public class Submission {
         this.moderatedBy = moderatedBy;
     }
     
-    public String getRejectionReason() {
-        return rejectionReason;
-    }
-    
-    public void setRejectionReason(String rejectionReason) {
-        this.rejectionReason = rejectionReason;
-    }
-    
     public List<String> getAlternativeModelsList() {
         if (alternativeModels == null || alternativeModels.trim().isEmpty()) {
             return new ArrayList<>();
@@ -239,14 +223,6 @@ public class Submission {
             display.append(indexCode);
         }
         return display.length() > 0 ? display.toString() : "Unknown";
-    }
-    
-    public Set<SubmissionAlternative> getSubmissionAlternatives() {
-        return submissionAlternatives;
-    }
-    
-    public void setSubmissionAlternatives(Set<SubmissionAlternative> submissionAlternatives) {
-        this.submissionAlternatives = submissionAlternatives;
     }
     
     public Set<Submission> getAlternatives() {

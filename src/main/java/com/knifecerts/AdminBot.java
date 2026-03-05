@@ -27,10 +27,8 @@ import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-import org.telegram.telegrambots.meta.api.objects.webapp.WebAppInfo;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import com.knifecerts.model.ModerationSession;
 import com.knifecerts.model.Submission;
 
 @Component
@@ -52,9 +50,6 @@ public class AdminBot extends TelegramLongPollingBot {
 
     @Autowired
     private KnifeBot knifeBot;
-
-    @Autowired
-    private ModerationSessionManager sessionManager;
 
     @Value("${webapp.base.url}")
     private String webAppBaseUrl;
@@ -974,6 +969,10 @@ public class AdminBot extends TelegramLongPollingBot {
                 return;
             }
             
+            // Web App функциональность временно отключена (ModerationSessionManager удален)
+            sendMessage(chatId, "⚠️ Web App редактор временно недоступен. Используйте кнопки для редактирования.");
+            
+            /* Закомментировано - Web App не реализован
             ModerationSession session = sessionManager.createSession(submissionId, moderatorId);
             
             String webAppUrl = webAppBaseUrl + "/moderation.html?token=" + session.getToken();
@@ -987,15 +986,12 @@ public class AdminBot extends TelegramLongPollingBot {
             
             List<InlineKeyboardButton> row = new ArrayList<>();
             row.add(InlineKeyboardButton.builder()
-                .text("✏️ Открыть редактор")
-                .webApp(new WebAppInfo(webAppUrl))
-                .build());
-            
             keyboard.add(row);
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
             
             execute(message);
+            */
             
         } catch (NumberFormatException e) {
             sendMessage(chatId, "❌ Неверный формат ID. Используйте: /edit <ID>");
@@ -1416,6 +1412,21 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void showApprovedSubmissionDetails(Long chatId, Long submissionId) {
         try {
+            // Проверяем, есть ли уже открытая форма
+            ModerationState existingState = moderationStates.get(chatId);
+            if (existingState != null && existingState.getFormMessageId() != null) {
+                // Удаляем только предыдущую форму заявки, не трогая список
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(existingState.getFormMessageId());
+                    execute(deleteMsg);
+                    logger.info("Deleted previous form message: " + existingState.getFormMessageId());
+                } catch (Exception e) {
+                    logger.info("Failed to delete previous form: " + e.getMessage());
+                }
+            }
+            
             Optional<Submission> submissionOpt = submissionService.getSubmissionById(submissionId);
             
             if (submissionOpt.isEmpty()) {
