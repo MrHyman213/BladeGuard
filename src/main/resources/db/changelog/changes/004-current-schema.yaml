@@ -1,0 +1,223 @@
+databaseChangeLog:
+  - changeSet:
+      id: 004-create-current-schema
+      author: system
+      comment: "Create actual database schema based on current active models"
+      changes:
+        # Создание таблицы брендов
+        - createTable:
+            tableName: brands
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+                    unique: true
+
+        # Создание таблицы моделей ножей
+        - createTable:
+            tableName: knife_models
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+                    unique: true
+
+        # Создание таблицы ножей (сертификатов)
+        - createTable:
+            tableName: knives
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: model_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: brand_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: idx
+                  type: VARCHAR(100)
+              - column:
+                  name: photo_path
+                  type: VARCHAR(512)
+
+        # Создание таблицы альтернатив ножей (many-to-many)
+        - createTable:
+            tableName: alternatives
+            columns:
+              - column:
+                  name: knife_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: alternative_knife_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+
+        # Создание таблицы заявок (буфер) - только для ожидающих рассмотрения
+        - createTable:
+            tableName: submissions_buffer
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: user_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: username
+                  type: VARCHAR(255)
+              - column:
+                  name: model_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: brand_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: idx
+                  type: VARCHAR(100)
+              - column:
+                  name: photo_path
+                  type: VARCHAR(512)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: false
+
+        # Создание таблицы альтернативных моделей в буфере (embedded)
+        - createTable:
+            tableName: buffer_alternatives
+            columns:
+              - column:
+                  name: submission_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: alt_model_name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: alt_brand_name
+                  type: VARCHAR(255)
+
+        # Добавление внешних ключей
+        - addForeignKeyConstraint:
+            baseTableName: knives
+            baseColumnNames: model_id
+            constraintName: fk_knives_model
+            referencedTableName: knife_models
+            referencedColumnNames: id
+            onDelete: CASCADE
+
+        - addForeignKeyConstraint:
+            baseTableName: knives
+            baseColumnNames: brand_id
+            constraintName: fk_knives_brand
+            referencedTableName: brands
+            referencedColumnNames: id
+            onDelete: CASCADE
+
+        - addForeignKeyConstraint:
+            baseTableName: alternatives
+            baseColumnNames: knife_id
+            constraintName: fk_alternatives_knife
+            referencedTableName: knives
+            referencedColumnNames: id
+            onDelete: CASCADE
+
+        - addForeignKeyConstraint:
+            baseTableName: alternatives
+            baseColumnNames: alternative_knife_id
+            constraintName: fk_alternatives_alt_knife
+            referencedTableName: knives
+            referencedColumnNames: id
+            onDelete: CASCADE
+
+        - addForeignKeyConstraint:
+            baseTableName: buffer_alternatives
+            baseColumnNames: submission_id
+            constraintName: fk_buffer_alternatives_submission
+            referencedTableName: submissions_buffer
+            referencedColumnNames: id
+            onDelete: CASCADE
+
+        # Добавление первичного ключа для таблицы альтернатив
+        - addPrimaryKey:
+            tableName: alternatives
+            columnNames: knife_id, alternative_knife_id
+            constraintName: pk_alternatives
+
+        # Создание индексов для производительности
+        - createIndex:
+            tableName: submissions_buffer
+            indexName: idx_submissions_user_id
+            columns:
+              - column:
+                  name: user_id
+
+        - createIndex:
+            tableName: submissions_buffer
+            indexName: idx_submissions_created_at
+            columns:
+              - column:
+                  name: created_at
+
+        - createIndex:
+            tableName: knives
+            indexName: idx_knives_model_brand
+            columns:
+              - column:
+                  name: model_id
+              - column:
+                  name: brand_id
+
+        - createIndex:
+            tableName: buffer_alternatives
+            indexName: idx_buffer_alternatives_submission
+            columns:
+              - column:
+                  name: submission_id

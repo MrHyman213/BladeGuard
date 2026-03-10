@@ -1,25 +1,36 @@
 package com.knifecerts;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.telegram.telegrambots.meta.TelegramBotsApi;
-import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
-
-import java.util.logging.Logger;
+import org.springframework.context.annotation.Primary;
 
 @Configuration
 public class BotConfig {
 
-    private static final Logger logger = Logger.getLogger(BotConfig.class.getName());
+    @Bean
+    @Primary
+    @ConditionalOnProperty(name = "bot.version", havingValue = "new", matchIfMissing = false)
+    public KnifeBotNew knifeBotNew() {
+        return new KnifeBotNew();
+    }
 
     @Bean
-    public TelegramBotsApi telegramBotsApi(KnifeBot knifeBot, AdminBot adminBot) throws TelegramApiException {
-        TelegramBotsApi api = new TelegramBotsApi(DefaultBotSession.class);
-        api.registerBot(knifeBot);
-        logger.info("KnifeBot registered successfully");
-        api.registerBot(adminBot);
-        logger.info("AdminBot registered successfully");
-        return api;
+    @ConditionalOnProperty(name = "bot.version", havingValue = "old", matchIfMissing = true)
+    public KnifeBot knifeBot() {
+        return new KnifeBot();
+    }
+
+    @Bean
+    @Primary
+    @ConditionalOnProperty(name = "admin.bot.version", havingValue = "new", matchIfMissing = false)
+    public AdminBotNew adminBotNew() {
+        return new AdminBotNew();
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "admin.bot.version", havingValue = "old", matchIfMissing = true)
+    public AdminBot adminBot() {
+        return new AdminBot();
     }
 }
