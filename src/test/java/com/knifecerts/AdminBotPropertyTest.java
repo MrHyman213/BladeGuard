@@ -4,6 +4,9 @@ import java.time.LocalDateTime;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+
+import com.knifecerts.bot.AdminBot;
+import com.knifecerts.bot.KnifeBot;
 import org.junit.jupiter.api.BeforeEach;
 import static org.mockito.Mockito.mock;
 

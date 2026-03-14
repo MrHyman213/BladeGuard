@@ -1,4 +1,4 @@
-package com.knifecerts;
+package com.knifecerts.service;
 
 import java.util.List;
 import java.util.Optional;

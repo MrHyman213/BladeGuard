@@ -1,4 +1,4 @@
-package com.knifecerts;
+package com.knifecerts.enums;
 
 /**
  * Коды ошибок для системы подачи сертификатов.

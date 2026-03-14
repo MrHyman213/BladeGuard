@@ -1,7 +1,8 @@
-package com.knifecerts;
+package com.knifecerts.config;
 
 import java.io.IOException;
 
+import com.knifecerts.service.YandexDiskService;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpEntity;
@@ -15,7 +16,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 @Order(2)
 public class YandexDiskInitializer implements CommandLineRunner {
 
-    private final YandexDiskService yandexDiskService;
+    private final com.knifecerts.service.YandexDiskService yandexDiskService;
     private final RestTemplate restTemplate = new RestTemplate();
 
     public YandexDiskInitializer(YandexDiskService yandexDiskService) {

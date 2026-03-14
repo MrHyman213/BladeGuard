@@ -1,4 +1,4 @@
-package com.knifecerts;
+package com.knifecerts.service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;

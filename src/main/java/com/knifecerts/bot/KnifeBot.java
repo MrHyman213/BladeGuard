@@ -1,9 +1,12 @@
-package com.knifecerts;
+package com.knifecerts.bot;
 
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,7 +28,12 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import com.knifecerts.model.Brand;
 import com.knifecerts.model.ConversationState;
 import com.knifecerts.model.ConversationStep;
-import com.knifecerts.model.Submission;
+import com.knifecerts.model.Knife;
+import com.knifecerts.model.SubmissionBuffer;
+import com.knifecerts.service.ConversationStateManager;
+import com.knifecerts.service.KnifeService;
+import com.knifecerts.service.SubmissionBufferService;
+import com.knifecerts.service.YandexDiskService;
 
 @Component("knifeBotRedesigned")
 public class KnifeBot extends TelegramLongPollingBot {
@@ -42,16 +50,19 @@ public class KnifeBot extends TelegramLongPollingBot {
     private YandexDiskService yandexDiskService;
 
     @Autowired
-    private SubmissionService submissionService;
+    private SubmissionBufferService submissionBufferService;
     
     @Autowired
-    private BrandService brandService;
+    private KnifeService knifeService;
     
     // Константа для разделителя альтернативных моделей
     private static final String ALTERNATIVE_SEPARATOR = "/";
 
     @Autowired
     private ConversationStateManager conversationStateManager;
+    
+    // Кэш для хранения последних разметок сообщений
+    private final Map<Integer, InlineKeyboardMarkup> lastMarkupCache = new ConcurrentHashMap<>();
 
     @Override
     public String getBotUsername() {
@@ -119,7 +130,7 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
     
     private Message sendMainMenuWithPage(Long chatId, int page) throws TelegramApiException {
-        List<Brand> allBrands = brandService.getBrandsWithApprovedKnives();
+        List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
         
         int itemsPerPage = 30;
         int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
@@ -149,7 +160,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             currentRow.add(InlineKeyboardButton.builder()
                 .text(displayName)
-                .callbackData("brand_" + brand.getId())
+                .callbackData("brand_" + brand.getName())
                 .build());
             
             if (currentRow.size() == 3) {
@@ -160,15 +171,6 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         if (!currentRow.isEmpty()) {
             keyboard.add(currentRow);
-        }
-        
-        if (brandService.hasUnbrandedKnives()) {
-            List<InlineKeyboardButton> unbrandedRow = new ArrayList<>();
-            unbrandedRow.add(InlineKeyboardButton.builder()
-                .text("🔪 Ножи без бренда")
-                .callbackData("brand_unbranded")
-                .build());
-            keyboard.add(unbrandedRow);
         }
         
         if (totalPages > 1) {
@@ -226,8 +228,8 @@ public class KnifeBot extends TelegramLongPollingBot {
             } else if (data.startsWith("knife_list_page_")) {
                 String[] parts = data.substring(16).split("_brand_");
                 int page = Integer.parseInt(parts[0]);
-                Long brandId = Long.parseLong(parts[1]);
-                updateKnifeList(userId, chatId, brandId, page);
+                String brandName = parts[1];
+                updateKnifeList(userId, chatId, brandName, page);
             } else if (data.equals("knife_list_current_page")) {
                 // Ignore
             } else if (data.startsWith("knife_")) {
@@ -302,7 +304,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            List<Brand> allBrands = brandService.getBrandsWithApprovedKnives();
+            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
             if (totalPages == 0) totalPages = 1;
@@ -326,7 +328,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 
                 currentRow.add(InlineKeyboardButton.builder()
                     .text(displayName)
-                    .callbackData("brand_" + brand.getId())
+                    .callbackData("brand_" + brand.getName())
                     .build());
                 
                 if (currentRow.size() == 3) {
@@ -339,14 +341,15 @@ public class KnifeBot extends TelegramLongPollingBot {
                 keyboard.add(currentRow);
             }
             
-            if (brandService.hasUnbrandedKnives()) {
-                List<InlineKeyboardButton> unbrandedRow = new ArrayList<>();
-                unbrandedRow.add(InlineKeyboardButton.builder()
-                    .text("🔪 Ножи без бренда")
-                    .callbackData("brand_unbranded")
-                    .build());
-                keyboard.add(unbrandedRow);
-            }
+            // TODO: Реализовать проверку небрендовых ножей в новой схеме
+            // if (knifeService.hasUnbrandedKnives()) {
+            //     List<InlineKeyboardButton> unbrandedRow = new ArrayList<>();
+            //     unbrandedRow.add(InlineKeyboardButton.builder()
+            //         .text("🔪 Ножи без бренда")
+            //         .callbackData("brand_unbranded")
+            //         .build());
+            //     keyboard.add(unbrandedRow);
+            // }
             
             if (totalPages > 1) {
                 List<InlineKeyboardButton> paginationRow = new ArrayList<>();
@@ -381,6 +384,12 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             markup.setKeyboard(keyboard);
             
+            // Проверка, изменилась ли разметка
+            if (!isMarkupChanged(state.getMainMenuMessageId(), markup)) {
+                logger.fine("Разметка главного меню не изменилась, пропускаем обновление");
+                return;
+            }
+            
             EditMessageReplyMarkup editMarkup = new EditMessageReplyMarkup();
             editMarkup.setChatId(chatId.toString());
             editMarkup.setMessageId(state.getMainMenuMessageId());
@@ -388,15 +397,24 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             execute(editMarkup);
             
+            // Сохраняем текущую разметку
+            saveLastMarkup(state.getMainMenuMessageId(), markup);
+            
             state.setCurrentPage(page);
             conversationStateManager.updateState(userId, state);
             
+        } catch (TelegramApiException e) {
+            if (e.getMessage() != null && e.getMessage().contains("message is not modified")) {
+                logger.fine("Сообщение не требует обновления: " + e.getMessage());
+            } else {
+                logger.severe("Error updating main menu: " + e.getMessage());
+            }
         } catch (Exception e) {
             logger.severe("Error updating main menu: " + e.getMessage());
         }
     }
 
-    private void handleBrandSelection(Long userId, Long chatId, String brandIdStr) {
+    private void handleBrandSelection(Long userId, Long chatId, String brandName) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null) {
@@ -405,18 +423,9 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             deleteAllExceptMainMenu(userId, chatId);
             
-            Long brandId = "unbranded".equals(brandIdStr) ? null : Long.parseLong(brandIdStr);
-            Brand brand = brandId != null ? brandService.getAllBrands().stream()
-                .filter(b -> b.getId().equals(brandId))
-                .findFirst().orElse(null) : null;
-            
-            if (brand == null && brandId != null) {
-                return;
-            }
-            
-            Message listMessage = sendKnifeList(chatId, brand, 0);
+            Message listMessage = sendKnifeList(chatId, brandName, 0);
             state.setCurrentListMessageId(listMessage.getMessageId());
-            state.setCurrentBrand(brand != null ? brand.getName() : "Бренд не указан");
+            state.setCurrentBrand(brandName);
             state.setCurrentPage(0);
             conversationStateManager.updateState(userId, state);
             
@@ -426,10 +435,8 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
 
 
-    private Message sendKnifeList(Long chatId, Brand brand, int page) throws TelegramApiException {
-        List<Submission> knives = brand != null ? 
-            submissionService.getKnifesByBrand(brand) : 
-            brandService.getUnbrandedKnives();
+    private Message sendKnifeList(Long chatId, String brandName, int page) throws TelegramApiException {
+        List<Knife> knives = knifeService.getCertificatesByBrand(brandName);
         
         int itemsPerPage = 30;
         int totalPages = (int) Math.ceil((double) knives.size() / itemsPerPage);
@@ -439,20 +446,19 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         int startIndex = page * itemsPerPage;
         int endIndex = Math.min(startIndex + itemsPerPage, knives.size());
-        List<Submission> pageKnives = knives.subList(startIndex, endIndex);
+        List<Knife> pageKnives = knives.subList(startIndex, endIndex);
         
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
-        message.setText("🏷️ " + (brand != null ? brand.getName() : "Ножи без бренда") + 
-            "\n\nВсего: " + knives.size() + " моделей");
+        message.setText("🏷️ " + brandName + "\n\nВсего: " + knives.size() + " моделей");
         
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         
         List<InlineKeyboardButton> currentRow = new ArrayList<>();
         for (int i = 0; i < pageKnives.size(); i++) {
-            Submission knife = pageKnives.get(i);
-            String displayName = knife.getName() != null ? knife.getName() : "ID:" + knife.getId();
+            Knife knife = pageKnives.get(i);
+            String displayName = knife.getModel().getName();
             if (displayName.length() > 15) {
                 displayName = displayName.substring(0, 12) + "...";
             }
@@ -476,11 +482,10 @@ public class KnifeBot extends TelegramLongPollingBot {
             List<InlineKeyboardButton> paginationRow = new ArrayList<>();
             int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
             int nextPage = (page + 1) % totalPages;
-            Long brandId = brand != null ? brand.getId() : -1L;
             
             paginationRow.add(InlineKeyboardButton.builder()
                 .text("⬅️")
-                .callbackData("knife_list_page_" + prevPage + "_brand_" + brandId)
+                .callbackData("knife_list_page_" + prevPage + "_brand_" + brandName)
                 .build());
             paginationRow.add(InlineKeyboardButton.builder()
                 .text(String.format("%d/%d", page + 1, totalPages))
@@ -488,7 +493,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 .build());
             paginationRow.add(InlineKeyboardButton.builder()
                 .text("➡️")
-                .callbackData("knife_list_page_" + nextPage + "_brand_" + brandId)
+                .callbackData("knife_list_page_" + nextPage + "_brand_" + brandName)
                 .build());
             keyboard.add(paginationRow);
         }
@@ -496,7 +501,7 @@ public class KnifeBot extends TelegramLongPollingBot {
         List<InlineKeyboardButton> actionRow = new ArrayList<>();
         actionRow.add(InlineKeyboardButton.builder()
             .text("🔍 Поиск")
-            .callbackData("search_knives_" + (brand != null ? brand.getId() : "-1"))
+            .callbackData("search_knives_" + brandName)
             .build());
         keyboard.add(actionRow);
         
@@ -513,20 +518,14 @@ public class KnifeBot extends TelegramLongPollingBot {
         return execute(message);
     }
 
-    private void updateKnifeList(Long userId, Long chatId, Long brandId, int page) {
+    private void updateKnifeList(Long userId, Long chatId, String brandName, int page) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null || state.getCurrentListMessageId() == null) {
                 return;
             }
             
-            Brand brand = brandId != -1 ? brandService.getAllBrands().stream()
-                .filter(b -> b.getId().equals(brandId))
-                .findFirst().orElse(null) : null;
-            
-            List<Submission> knives = brand != null ? 
-                submissionService.getKnifesByBrand(brand) : 
-                brandService.getUnbrandedKnives();
+            List<Knife> knives = knifeService.getCertificatesByBrand(brandName);
             
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) knives.size() / itemsPerPage);
@@ -536,15 +535,15 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             int startIndex = page * itemsPerPage;
             int endIndex = Math.min(startIndex + itemsPerPage, knives.size());
-            List<Submission> pageKnives = knives.subList(startIndex, endIndex);
+            List<Knife> pageKnives = knives.subList(startIndex, endIndex);
             
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             List<InlineKeyboardButton> currentRow = new ArrayList<>();
             for (int i = 0; i < pageKnives.size(); i++) {
-                Submission knife = pageKnives.get(i);
-                String displayName = knife.getName() != null ? knife.getName() : "ID:" + knife.getId();
+                Knife knife = pageKnives.get(i);
+                String displayName = knife.getModel().getName();
                 if (displayName.length() > 15) {
                     displayName = displayName.substring(0, 12) + "...";
                 }
@@ -571,7 +570,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text("⬅️")
-                    .callbackData("knife_list_page_" + prevPage + "_brand_" + brandId)
+                    .callbackData("knife_list_page_" + prevPage + "_brand_" + brandName)
                     .build());
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text(String.format("%d/%d", page + 1, totalPages))
@@ -579,7 +578,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                     .build());
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text("➡️")
-                    .callbackData("knife_list_page_" + nextPage + "_brand_" + brandId)
+                    .callbackData("knife_list_page_" + nextPage + "_brand_" + brandName)
                     .build());
                 keyboard.add(paginationRow);
             }
@@ -587,7 +586,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             List<InlineKeyboardButton> actionRow = new ArrayList<>();
             actionRow.add(InlineKeyboardButton.builder()
                 .text("🔍 Поиск")
-                .callbackData("search_knives_" + brandId)
+                .callbackData("search_knives_" + brandName)
                 .build());
             keyboard.add(actionRow);
             
@@ -615,7 +614,7 @@ public class KnifeBot extends TelegramLongPollingBot {
         }
     }
 
-    private void showCertificate(Long userId, Long chatId, Long submissionId) {
+    private void showCertificate(Long userId, Long chatId, Long knifeId) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null) {
@@ -626,96 +625,141 @@ public class KnifeBot extends TelegramLongPollingBot {
                 deleteMessage(chatId, state.getCurrentCertificateMessageId());
             }
             
-            Optional<Submission> submissionOpt = submissionService.getSubmissionById(submissionId);
-            if (submissionOpt.isEmpty()) {
+            Optional<Knife> knifeOpt = knifeService.getKnifeById(knifeId);
+            if (knifeOpt.isEmpty()) {
                 return;
             }
             
-            Submission submission = submissionOpt.get();
-            List<Submission> alternatives = submissionService.getAlternatives(submissionId);
+            Knife knife = knifeOpt.get();
             
-            StringBuilder caption = new StringBuilder();
-            caption.append("🔪 ").append(submission.getDisplayName()).append("\n\n");
-            if (submission.getBrand() != null) {
-                caption.append("🏷️ ").append(submission.getBrand().getName()).append("\n");
-            }
-            if (submission.getIndexCode() != null) {
-                caption.append("🔢 ").append(submission.getIndexCode()).append("\n");
-            }
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            if (!alternatives.isEmpty()) {
-                String separator = ALTERNATIVE_SEPARATOR;
-                List<InlineKeyboardButton> separatorRow = new ArrayList<>();
-                separatorRow.add(InlineKeyboardButton.builder()
-                    .text("──── " + separator + " Альтернативы " + separator + " ────")
-                    .callbackData("alt_separator")
-                    .build());
-                keyboard.add(separatorRow);
-                
-                int maxShow = Math.min(2, alternatives.size());
-                for (int i = 0; i < maxShow; i++) {
-                    Submission alt = alternatives.get(i);
-                    String altName = alt.getDisplayName();
-                    if (altName.length() > 40) {
-                        altName = altName.substring(0, 37) + "...";
-                    }
-                    
-                    List<InlineKeyboardButton> altRow = new ArrayList<>();
-                    altRow.add(InlineKeyboardButton.builder()
-                        .text(altName)
-                        .callbackData("knife_" + alt.getId())
-                        .build());
-                    keyboard.add(altRow);
-                }
-                
-                if (alternatives.size() > 2) {
-                    List<InlineKeyboardButton> moreRow = new ArrayList<>();
-                    moreRow.add(InlineKeyboardButton.builder()
-                        .text("Больше... (" + alternatives.size() + ")")
-                        .callbackData("alternatives_" + submissionId)
-                        .build());
-                    keyboard.add(moreRow);
-                }
-            }
-            
-            List<InlineKeyboardButton> backRow = new ArrayList<>();
-            backRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Назад")
-                .callbackData("back_to_knives")
-                .build());
-            keyboard.add(backRow);
-            
-            markup.setKeyboard(keyboard);
-            
-            if (submission.getPhotoPath() != null) {
-                try (InputStream photoStream = yandexDiskService.downloadPhoto(submission.getPhotoPath())) {
-                    SendPhoto sendPhoto = new SendPhoto();
-                    sendPhoto.setChatId(chatId.toString());
-                    sendPhoto.setPhoto(new InputFile(photoStream, "certificate.jpg"));
-                    sendPhoto.setCaption(caption.toString());
-                    sendPhoto.setReplyMarkup(markup);
-                    
-                    Message certMessage = execute(sendPhoto);
-                    state.setCurrentCertificateMessageId(certMessage.getMessageId());
-                    conversationStateManager.updateState(userId, state);
-                }
+            // Проверяем, есть ли сертификат
+            if (knife.getPhotoPath() != null) {
+                // Показываем сертификат
+                showKnifeCertificate(userId, chatId, knife);
             } else {
-                SendMessage message = new SendMessage();
-                message.setChatId(chatId.toString());
-                message.setText(caption.toString() + "\n\n⚠️ Фото отсутствует");
-                message.setReplyMarkup(markup);
-                
-                Message certMessage = execute(message);
-                state.setCurrentCertificateMessageId(certMessage.getMessageId());
-                conversationStateManager.updateState(userId, state);
+                // Показываем альтернативы
+                showKnifeAlternatives(userId, chatId, knife);
             }
             
         } catch (Exception e) {
             logger.severe("Error showing certificate: " + e.getMessage());
         }
+    }
+
+    private void showKnifeCertificate(Long userId, Long chatId, Knife knife) throws Exception {
+        ConversationState state = conversationStateManager.getState(userId);
+        List<Knife> alternatives = knifeService.getAlternatives(knife.getId());
+        
+        StringBuilder caption = new StringBuilder();
+        caption.append("🔪 ").append(knife.getDisplayName()).append("\n\n");
+        caption.append("🏷️ ").append(knife.getBrand().getName()).append("\n");
+        if (knife.getIndex() != null) {
+            caption.append("🔢 ").append(knife.getIndex()).append("\n");
+        }
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        if (!alternatives.isEmpty()) {
+            String separator = ALTERNATIVE_SEPARATOR;
+            List<InlineKeyboardButton> separatorRow = new ArrayList<>();
+            separatorRow.add(InlineKeyboardButton.builder()
+                .text("──── " + separator + " Альтернативы " + separator + " ────")
+                .callbackData("alt_separator")
+                .build());
+            keyboard.add(separatorRow);
+            
+            int maxShow = Math.min(2, alternatives.size());
+            for (int i = 0; i < maxShow; i++) {
+                Knife alt = alternatives.get(i);
+                String altName = alt.getDisplayName();
+                if (altName.length() > 40) {
+                    altName = altName.substring(0, 37) + "...";
+                }
+                
+                List<InlineKeyboardButton> altRow = new ArrayList<>();
+                altRow.add(InlineKeyboardButton.builder()
+                    .text(altName)
+                    .callbackData("knife_" + alt.getId())
+                    .build());
+                keyboard.add(altRow);
+            }
+            
+            if (alternatives.size() > 2) {
+                List<InlineKeyboardButton> moreRow = new ArrayList<>();
+                moreRow.add(InlineKeyboardButton.builder()
+                    .text("Больше... (" + alternatives.size() + ")")
+                    .callbackData("alternatives_" + knife.getId())
+                    .build());
+                keyboard.add(moreRow);
+            }
+        }
+        
+        List<InlineKeyboardButton> backRow = new ArrayList<>();
+        backRow.add(InlineKeyboardButton.builder()
+            .text("🔙 Назад")
+            .callbackData("back_to_knives")
+            .build());
+        keyboard.add(backRow);
+        
+        markup.setKeyboard(keyboard);
+        
+        try (InputStream photoStream = yandexDiskService.downloadPhoto(knife.getPhotoPath())) {
+            SendPhoto sendPhoto = new SendPhoto();
+            sendPhoto.setChatId(chatId.toString());
+            sendPhoto.setPhoto(new InputFile(photoStream, "certificate.jpg"));
+            sendPhoto.setCaption(caption.toString());
+            sendPhoto.setReplyMarkup(markup);
+            
+            Message certMessage = execute(sendPhoto);
+            state.setCurrentCertificateMessageId(certMessage.getMessageId());
+            conversationStateManager.updateState(userId, state);
+        }
+    }
+
+    private void showKnifeAlternatives(Long userId, Long chatId, Knife knife) throws Exception {
+        ConversationState state = conversationStateManager.getState(userId);
+        List<Knife> alternatives = knifeService.getAlternatives(knife.getId());
+        
+        StringBuilder text = new StringBuilder();
+        text.append("🔪 ").append(knife.getDisplayName()).append("\n\n");
+        text.append("❌ Извините, но на данный момент у нас нет сертификата данной модели.\n\n");
+        
+        if (!alternatives.isEmpty()) {
+            text.append("Мы могли бы предложить альтернативные варианты:\n");
+        }
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        for (Knife alt : alternatives) {
+            if (alt.getPhotoPath() != null) { // Только с сертификатами
+                List<InlineKeyboardButton> altRow = new ArrayList<>();
+                altRow.add(InlineKeyboardButton.builder()
+                    .text(alt.getDisplayName())
+                    .callbackData("knife_" + alt.getId())
+                    .build());
+                keyboard.add(altRow);
+            }
+        }
+        
+        List<InlineKeyboardButton> backRow = new ArrayList<>();
+        backRow.add(InlineKeyboardButton.builder()
+            .text("🔙 Назад")
+            .callbackData("back_to_knives")
+            .build());
+        keyboard.add(backRow);
+        
+        markup.setKeyboard(keyboard);
+        
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText(text.toString());
+        message.setReplyMarkup(markup);
+        
+        Message certMessage = execute(message);
+        state.setCurrentCertificateMessageId(certMessage.getMessageId());
+        conversationStateManager.updateState(userId, state);
     }
 
 
@@ -731,7 +775,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 state.setCurrentCertificateMessageId(null);
             }
             
-            List<Submission> alternatives = submissionService.getAlternatives(submissionId);
+            List<Knife> alternatives = knifeService.getAllAlternatives(submissionId);
             
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) alternatives.size() / itemsPerPage);
@@ -741,7 +785,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             int startIndex = page * itemsPerPage;
             int endIndex = Math.min(startIndex + itemsPerPage, alternatives.size());
-            List<Submission> pageAlts = alternatives.subList(startIndex, endIndex);
+            List<Knife> pageAlts = alternatives.subList(startIndex, endIndex);
             
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
@@ -752,7 +796,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             List<InlineKeyboardButton> currentRow = new ArrayList<>();
             for (int i = 0; i < pageAlts.size(); i++) {
-                Submission alt = pageAlts.get(i);
+                Knife alt = pageAlts.get(i);
                 String displayName = alt.getDisplayName();
                 if (displayName.length() > 15) {
                     displayName = displayName.substring(0, 12) + "...";
@@ -1144,7 +1188,8 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         deleteMessage(chatId, update.getMessage().getMessageId());
         
-        List<Brand> brands = brandService.searchBrands(query);
+        // TODO: Реализовать поиск брендов в новой схеме
+        List<Brand> brands = List.of(); // brandService.searchBrands(query);
         
         state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
         conversationStateManager.updateState(userId, state);
@@ -1343,18 +1388,30 @@ public class KnifeBot extends TelegramLongPollingBot {
                 photoPath = yandexDiskService.uploadToOffers(photoStream, fileName);
             }
             
-            Submission submission = submissionService.createSubmission(
+            // Создаем заявку в буфере
+            SubmissionBuffer submission = submissionBufferService.createSubmission(
                 userId,
                 state.getUsername(),
-                photoPath,
                 state.getName(),
                 state.getBrand(),
                 state.getIndexCode(),
-                state.getAlternatives()
+                photoPath
             );
             
-            // Альтернативные модели уже сохранены в submission.alternativeModels (JSON)
-            // PendingAlternativeService больше не используется
+            // Добавляем альтернативы
+            if (state.getAlternatives() != null) {
+                for (String altStr : state.getAlternatives()) {
+                    String[] parts = altStr.split(java.util.regex.Pattern.quote(ALTERNATIVE_SEPARATOR));
+                    if (parts.length >= 2) {
+                        String brandName = parts[0].trim();
+                        String modelName = parts[1].trim();
+                        submissionBufferService.addAlternativeToSubmission(submission.getId(), modelName, brandName);
+                    } else if (parts.length == 1) {
+                        String modelName = parts[0].trim();
+                        submissionBufferService.addAlternativeToSubmission(submission.getId(), modelName, null);
+                    }
+                }
+            }
             
             // Удаляем форму
             if (state.getFormMessageId() != null) {
@@ -1484,13 +1541,30 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
+            InlineKeyboardMarkup newMarkup = buildSubmissionFormKeyboard(state);
+            
+            // Проверка, изменилась ли разметка
+            if (!isMarkupChanged(state.getFormMessageId(), newMarkup)) {
+                logger.fine("Разметка формы не изменилась, пропускаем обновление");
+                return;
+            }
+            
             EditMessageReplyMarkup editMarkup = new EditMessageReplyMarkup();
             editMarkup.setChatId(chatId.toString());
             editMarkup.setMessageId(state.getFormMessageId());
-            editMarkup.setReplyMarkup(buildSubmissionFormKeyboard(state));
+            editMarkup.setReplyMarkup(newMarkup);
             
             execute(editMarkup);
             
+            // Сохраняем текущую разметку
+            saveLastMarkup(state.getFormMessageId(), newMarkup);
+            
+        } catch (TelegramApiException e) {
+            if (e.getMessage() != null && e.getMessage().contains("message is not modified")) {
+                logger.fine("Сообщение не требует обновления: " + e.getMessage());
+            } else {
+                logger.severe("Error updating form keyboard: " + e.getMessage());
+            }
         } catch (Exception e) {
             logger.severe("Error updating form keyboard: " + e.getMessage());
         }
@@ -1506,5 +1580,48 @@ public class KnifeBot extends TelegramLongPollingBot {
             logger.severe("Error sending message: " + e.getMessage());
             return null;
         }
+    }
+    
+    // Методы для проверки и кэширования разметок сообщений
+    private boolean isMarkupChanged(Integer messageId, InlineKeyboardMarkup newMarkup) {
+        InlineKeyboardMarkup lastMarkup = getLastMarkup(messageId);
+        return lastMarkup == null || !markupsEqual(lastMarkup, newMarkup);
+    }
+    
+    private boolean markupsEqual(InlineKeyboardMarkup markup1, InlineKeyboardMarkup markup2) {
+        if (markup1 == null && markup2 == null) return true;
+        if (markup1 == null || markup2 == null) return false;
+        
+        List<List<InlineKeyboardButton>> keyboard1 = markup1.getKeyboard();
+        List<List<InlineKeyboardButton>> keyboard2 = markup2.getKeyboard();
+        
+        if (keyboard1.size() != keyboard2.size()) return false;
+        
+        for (int i = 0; i < keyboard1.size(); i++) {
+            List<InlineKeyboardButton> row1 = keyboard1.get(i);
+            List<InlineKeyboardButton> row2 = keyboard2.get(i);
+            
+            if (row1.size() != row2.size()) return false;
+            
+            for (int j = 0; j < row1.size(); j++) {
+                InlineKeyboardButton btn1 = row1.get(j);
+                InlineKeyboardButton btn2 = row2.get(j);
+                
+                if (!Objects.equals(btn1.getText(), btn2.getText()) ||
+                    !Objects.equals(btn1.getCallbackData(), btn2.getCallbackData())) {
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
+    
+    private void saveLastMarkup(Integer messageId, InlineKeyboardMarkup markup) {
+        lastMarkupCache.put(messageId, markup);
+    }
+    
+    private InlineKeyboardMarkup getLastMarkup(Integer messageId) {
+        return lastMarkupCache.get(messageId);
     }
 }

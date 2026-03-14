@@ -3,6 +3,8 @@ package com.knifecerts;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+
+import com.knifecerts.bot.KnifeBot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import static org.mockito.Mockito.mock;

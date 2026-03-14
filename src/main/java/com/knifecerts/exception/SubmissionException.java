@@ -1,4 +1,6 @@
-package com.knifecerts;
+package com.knifecerts.exception;
+
+import com.knifecerts.enums.ErrorCode;
 
 /**
  * Пользовательское исключение для ошибок системы подачи сертификатов.

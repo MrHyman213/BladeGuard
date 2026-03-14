@@ -1,4 +1,4 @@
-package com.knifecerts;
+package com.knifecerts.service;
 
 import java.util.List;
 import java.util.Optional;
@@ -12,6 +12,7 @@ import com.knifecerts.model.BufferAlternative;
 import com.knifecerts.model.Knife;
 import com.knifecerts.model.KnifeModel;
 import com.knifecerts.model.SubmissionBuffer;
+import com.knifecerts.model.SubmissionStatus;
 import com.knifecerts.repository.BrandRepository;
 import com.knifecerts.repository.KnifeModelRepository;
 import com.knifecerts.repository.KnifeRepository;
@@ -51,6 +52,15 @@ public class SubmissionBufferService {
 
     public Optional<SubmissionBuffer> getSubmissionById(Long id) {
         return submissionBufferRepository.findById(id);
+    }
+
+    public SubmissionBuffer getSubmissionByIdWithAlternatives(Long id) {
+        return submissionBufferRepository.findByIdWithAlternatives(id)
+            .orElseThrow(() -> new RuntimeException("Submission not found: " + id));
+    }
+
+    public List<SubmissionBuffer> getPendingSubmissionsWithAlternatives() {
+        return submissionBufferRepository.findByStatusWithAlternatives(SubmissionStatus.PENDING);
     }
 
     public List<SubmissionBuffer> getSubmissionsByUserId(Long userId) {
