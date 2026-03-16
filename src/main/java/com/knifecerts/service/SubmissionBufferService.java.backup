@@ -142,24 +142,12 @@ public class SubmissionBufferService {
     }
 
     private Brand findOrCreateBrand(String name) {
-        // Если бренд не указан, используем бренд с id = 1 (Ножи без бренда)
-        if (name == null || name.trim().isEmpty()) {
-            return brandRepository.findById(1L)
-                    .orElseGet(() -> brandRepository.save(new Brand(null)));
-        }
-        
-        String trimmedName = name.trim();
-        return brandRepository.findByName(trimmedName)
-                .orElseGet(() -> brandRepository.save(new Brand(trimmedName)));
+        return brandRepository.findByName(name)
+                .orElseGet(() -> brandRepository.save(new Brand(name)));
     }
 
     private KnifeModel findOrCreateKnifeModel(String name) {
-        if (name == null || name.trim().isEmpty()) {
-            throw new IllegalArgumentException("Имя модели не может быть пустым");
-        }
-        
-        String trimmedName = name.trim();
-        return knifeModelRepository.findByName(trimmedName)
-                .orElseGet(() -> knifeModelRepository.save(new KnifeModel(trimmedName)));
+        return knifeModelRepository.findByName(name)
+                .orElseGet(() -> knifeModelRepository.save(new KnifeModel(name)));
     }
 }

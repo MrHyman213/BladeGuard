@@ -151,7 +151,7 @@ public class AdminBot extends TelegramLongPollingBot {
             this.brand = original.getBrandName();
             this.indexCode = original.getIndex();
             this.alternativeModels = original.getAlternatives().stream()
-                .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " / " + alt.getBrandName() : ""))
+                .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " (" + alt.getBrandName() + ")" : ""))
                 .collect(java.util.stream.Collectors.toList());
             this.isApprovedView = false;
         }
@@ -162,7 +162,7 @@ public class AdminBot extends TelegramLongPollingBot {
             this.brand = original.getBrand().getName();
             this.indexCode = original.getIndex();
             this.alternativeModels = original.getAlternatives().stream()
-                .map(alt -> alt.getModel().getName() + " / " + alt.getBrand().getName())
+                .map(alt -> alt.getModel().getName() + " (" + alt.getBrand().getName() + ")")
                 .collect(java.util.stream.Collectors.toList());
             this.isApprovedView = isApprovedView;
         }
@@ -175,7 +175,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 String originalBrand = sub.getBrandName();
                 String originalIndex = sub.getIndex();
                 List<String> originalAlts = sub.getAlternatives().stream()
-                    .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " / " + alt.getBrandName() : ""))
+                    .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " (" + alt.getBrandName() + ")" : ""))
                     .collect(java.util.stream.Collectors.toList());
                 
                 boolean nameChanged = !java.util.Objects.equals(originalName, name);
@@ -190,7 +190,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 String originalBrand = knife.getBrand().getName();
                 String originalIndex = knife.getIndex();
                 List<String> originalAlts = knife.getAlternatives().stream()
-                    .map(alt -> alt.getModel().getName() + " / " + alt.getBrand().getName())
+                    .map(alt -> alt.getModel().getName() + " (" + alt.getBrand().getName() + ")")
                     .collect(java.util.stream.Collectors.toList());
                 
                 boolean nameChanged = !java.util.Objects.equals(originalName, name);
@@ -278,6 +278,8 @@ public class AdminBot extends TelegramLongPollingBot {
                         handleSetIndexCommand(chatId, moderatorId, messageText);
                     } else if (messageText.startsWith("/setalt ")) {
                         handleSetAltCommand(chatId, moderatorId, messageText);
+                    } else if (messageText.equals("/clearall")) {
+                        handleClearAllCommand(chatId, moderatorId);
                     } else {
                         // Проверяем, есть ли активное состояние поиска
                         if (searchStates.containsKey(chatId)) {
@@ -296,7 +298,9 @@ public class AdminBot extends TelegramLongPollingBot {
                             // Проверяем, есть ли активное состояние редактирования
                             ModerationState state = moderationStates.get(chatId);
                             if (state != null && state.getEditingField() != null) {
-                                handleModFieldInput(chatId, messageText, userMessageId);
+                                // НОВОЕ: Удаляем сообщение пользователя ПЕРЕД обработкой
+                                deleteUserMessage(chatId, userMessageId);
+                                handleModFieldInput(chatId, messageText);
                             } else {
                                 sendMessage(chatId, "Неизвестная команда. Используйте /start для списка команд.");
                             }
@@ -352,12 +356,20 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleApprovedCommand(chatId, 0);
             } else if (data.equals("menu_upload")) {
                 sendMessage(chatId, "📤 Отправьте фото для загрузки на Яндекс.Диск");
+            } else if (data.equals("menu_clearall")) {
+                sendClearConfirmation(chatId);
+            } else if (data.equals("menu_disk_analysis")) {
+                handleDiskAnalysis(chatId);
             } else if (data.equals("menu_error_log")) {
                 handleErrorLog(chatId);
             } else if (data.equals("menu_settings")) {
                 handleSettingsCommand(chatId);
             } else if (data.equals("settings_change_separator")) {
                 handleChangeSeparatorRequest(chatId);
+            } else if (data.equals("disk_clean_broken")) {
+                handleCleanBrokenLinks(chatId);
+            } else if (data.equals("disk_clean_orphaned")) {
+                handleCleanOrphanedPhotos(chatId);
             } else if (data.equals("error_log_clear")) {
                 handleErrorLogClear(chatId);
             } else if (data.equals("back_to_menu")) {
@@ -392,6 +404,10 @@ public class AdminBot extends TelegramLongPollingBot {
                 searchStates.remove(chatId);
                 currentWindow.remove(chatId);
                 
+                sendMainMenu(chatId);
+                handleClearAllCommand(chatId, moderatorId);
+            } else if (data.equals("confirm_clear_no")) {
+                sendMessage(chatId, "❌ Очистка отменена");
                 sendMainMenu(chatId);
             } else if (data.startsWith("view_approved_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
@@ -1057,7 +1073,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 for (var alt : submission.getAlternatives()) {
                     caption.append("  • ").append(alt.getModelName());
                     if (alt.getBrandName() != null) {
-                        caption.append(" / ").append(alt.getBrandName());
+                        caption.append(" (").append(alt.getBrandName()).append(")");
                     }
                     caption.append("\n");
                 }
@@ -1306,18 +1322,34 @@ public class AdminBot extends TelegramLongPollingBot {
         // Четвертая строка
         List<InlineKeyboardButton> row4 = new ArrayList<>();
         row4.add(InlineKeyboardButton.builder()
-            .text("📋 Журнал ошибок")
-            .callbackData("menu_error_log")
+            .text("🔍 Анализ диска")
+            .callbackData("menu_disk_analysis")
             .build());
         keyboard.add(row4);
         
         // Пятая строка
         List<InlineKeyboardButton> row5 = new ArrayList<>();
         row5.add(InlineKeyboardButton.builder()
+            .text("📋 Журнал ошибок")
+            .callbackData("menu_error_log")
+            .build());
+        keyboard.add(row5);
+        
+        // Шестая строка
+        List<InlineKeyboardButton> row6 = new ArrayList<>();
+        row6.add(InlineKeyboardButton.builder()
             .text("⚙️ Настройки")
             .callbackData("menu_settings")
             .build());
-        keyboard.add(row5);
+        keyboard.add(row6);
+        
+        // Седьмая строка
+        List<InlineKeyboardButton> row7 = new ArrayList<>();
+        row7.add(InlineKeyboardButton.builder()
+            .text("🗑️ Очистить все данные")
+            .callbackData("menu_clearall")
+            .build());
+        keyboard.add(row7);
         
         markup.setKeyboard(keyboard);
         message.setReplyMarkup(markup);
@@ -1328,6 +1360,35 @@ public class AdminBot extends TelegramLongPollingBot {
             messages.setMainMenuMessageId(sent.getMessageId());
         } catch (TelegramApiException e) {
             logger.severe("Error sending menu: " + e.getMessage());
+        }
+    }
+    
+    private void sendClearConfirmation(Long chatId) {
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText("⚠️ Вы уверены, что хотите очистить все фото из папок на Яндекс.Диске?\n\nЭто действие нельзя отменить!");
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        row.add(InlineKeyboardButton.builder()
+            .text("✅ Да, очистить")
+            .callbackData("confirm_clear_yes")
+            .build());
+        row.add(InlineKeyboardButton.builder()
+            .text("❌ Отмена")
+            .callbackData("confirm_clear_no")
+            .build());
+        keyboard.add(row);
+        
+        markup.setKeyboard(keyboard);
+        message.setReplyMarkup(markup);
+        
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            logger.severe("Error sending confirmation: " + e.getMessage());
         }
     }
     
@@ -1675,6 +1736,72 @@ public class AdminBot extends TelegramLongPollingBot {
         sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
     }
     
+    private void handleClearAllCommand(Long chatId, Long moderatorId) {
+        try {
+            sendMessage(chatId, "⚠️ Очистка всех данных...");
+            
+            int totalDeleted = 0;
+            int dbRecordsDeleted = 0;
+            
+            // Очистка базы данных - только буфер заявок
+            try {
+                List<SubmissionBuffer> allSubmissions = submissionBufferService.getAllPendingSubmissions();
+                dbRecordsDeleted = allSubmissions.size();
+                
+                if (dbRecordsDeleted > 0) {
+                    for (SubmissionBuffer submission : allSubmissions) {
+                        submissionBufferService.rejectSubmission(submission.getId());
+                    }
+                    sendMessage(chatId, "✅ Буфер заявок очищен. Удалено записей: " + dbRecordsDeleted);
+                } else {
+                    sendMessage(chatId, "ℹ️ Буфер заявок пуст");
+                }
+            } catch (Exception e) {
+                logger.warning("Ошибка очистки буфера заявок: " + e.getMessage());
+                sendMessage(chatId, "⚠️ Ошибка очистки буфера заявок");
+            }
+            
+            // Очистка папок на Яндекс.Диске
+            try {
+                int deleted = yandexDiskService.clearFolder("app:/certificates/offers");
+                if (deleted > 0) {
+                    sendMessage(chatId, "✅ Папка offers очищена. Удалено файлов: " + deleted);
+                    totalDeleted += deleted;
+                } else {
+                    sendMessage(chatId, "ℹ️ Папка offers пуста");
+                }
+            } catch (Exception e) {
+                logger.warning("Ошибка очистки offers: " + e.getMessage());
+                sendMessage(chatId, "⚠️ Папка offers не найдена");
+            }
+            
+            try {
+                int deleted = yandexDiskService.clearFolder("app:/certificates/certificates");
+                if (deleted > 0) {
+                    sendMessage(chatId, "✅ Папка certificates очищена. Удалено файлов: " + deleted);
+                    totalDeleted += deleted;
+                } else {
+                    sendMessage(chatId, "ℹ️ Папка certificates пуста");
+                }
+            } catch (Exception e) {
+                logger.warning("Ошибка очистки certificates: " + e.getMessage());
+                sendMessage(chatId, "⚠️ Папка certificates не найдена");
+            }
+            
+            if (dbRecordsDeleted > 0 || totalDeleted > 0) {
+                sendMessage(chatId, "✅ Очистка завершена! Удалено записей: " + dbRecordsDeleted + ", файлов: " + totalDeleted);
+            } else {
+                sendMessage(chatId, "ℹ️ Все данные уже пусты");
+            }
+            
+            sendMainMenu(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при очистке данных: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при очистке данных");
+        }
+    }
+    
     private void handleModEditField(Long chatId, Long submissionId, String field) {
         ModerationState state = moderationStates.get(chatId);
         if (state == null) {
@@ -1742,14 +1869,11 @@ public class AdminBot extends TelegramLongPollingBot {
         }
     }
     
-    private void handleModFieldInput(Long chatId, String text, Integer userMessageId) {
+    private void handleModFieldInput(Long chatId, String text) {
         ModerationState state = moderationStates.get(chatId);
         if (state == null || state.getEditingField() == null) {
             return;
         }
-        
-        // Удаляем сообщение пользователя
-        deleteUserMessage(chatId, userMessageId);
         
         String field = state.getEditingField();
         
@@ -1889,39 +2013,14 @@ public class AdminBot extends TelegramLongPollingBot {
             return;
         }
         
-        // Валидация перед одобрением
-        List<String> errors = new ArrayList<>();
-        
-        if (state.getName() == null || state.getName().trim().isEmpty()) {
-            errors.add("❌ Название модели не заполнено");
-        }
-        
-        if (state.getIndexCode() == null || state.getIndexCode().trim().isEmpty()) {
-            errors.add("❌ Индекс не заполнен");
-        }
-        
-        if (!errors.isEmpty()) {
-            StringBuilder message = new StringBuilder();
-            message.append("⚠️ Невозможно одобрить заявку:\n\n");
-            for (String error : errors) {
-                message.append(error).append("\n");
-            }
-            message.append("\n📝 Заполните все обязательные поля.");
-            
-            sendMessage(chatId, message.toString());
-            return;
-        }
-        
         try {
             // Применяем изменения к заявке
             SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
             
-            // Обновляем поля заявки (теперь гарантированно не null)
-            submission.setModelName(state.getName().trim());
-            submission.setBrandName(state.getBrand() != null && !state.getBrand().trim().isEmpty() 
-                ? state.getBrand().trim() 
-                : null);
-            submission.setIndex(state.getIndexCode().trim());
+            // Обновляем поля заявки
+            submission.setModelName(state.getName());
+            submission.setBrandName(state.getBrand());
+            submission.setIndex(state.getIndexCode());
             
             // Обновляем альтернативы
             submission.getAlternatives().clear();
@@ -2456,6 +2555,21 @@ public class AdminBot extends TelegramLongPollingBot {
     private void handleApprovedSearchRequest(Long chatId) {
         searchStates.put(chatId, "approved");
         sendMessage(chatId, "🔍 Введите название или индекс для поиска:");
+    }
+    
+    private void handleDiskAnalysis(Long chatId) {
+        sendMessage(chatId, "⚠️ Анализ диска временно недоступен в новой схеме базы данных. Функция будет добавлена позже.");
+        sendMainMenu(chatId);
+    }
+    
+    private void handleCleanBrokenLinks(Long chatId) {
+        sendMessage(chatId, "⚠️ Очистка битых ссылок временно недоступна в новой схеме базы данных. Функция будет добавлена позже.");
+        sendMainMenu(chatId);
+    }
+    
+    private void handleCleanOrphanedPhotos(Long chatId) {
+        sendMessage(chatId, "⚠️ Очистка неиспользуемых фото временно недоступна в новой схеме базы данных. Функция будет добавлена позже.");
+        sendMainMenu(chatId);
     }
     
     private void logError(String operation, String error) {

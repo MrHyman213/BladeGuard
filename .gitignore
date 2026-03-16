@@ -33,7 +33,7 @@ build/
 
 ### Environment ###
 .kiro
-.docs
+/docs/my
 .env
 *.log
 
