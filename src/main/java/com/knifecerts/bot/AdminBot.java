@@ -1,14 +1,16 @@
 package com.knifecerts.bot;
 
 import java.io.InputStream;
-import java.net.URL;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,10 +29,22 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMa
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
+import com.knifecerts.dto.AlternativeEntry;
+import com.knifecerts.model.Brand;
 import com.knifecerts.model.Knife;
+import com.knifecerts.model.KnifeModel;
 import com.knifecerts.model.SubmissionBuffer;
+import com.knifecerts.repository.BrandRepository;
+import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.repository.KnifeRepository;
+import com.knifecerts.repository.SubmissionBufferRepository;
+import com.knifecerts.service.AlternativesParser;
+import com.knifecerts.service.AlternativesParserImpl;
 import com.knifecerts.service.KnifeService;
+import com.knifecerts.service.MainMenuUpdateService;
+import com.knifecerts.service.NavigationStackService;
 import com.knifecerts.service.SubmissionBufferService;
+import com.knifecerts.service.TransitiveAlternativesService;
 import com.knifecerts.service.YandexDiskService;
 
 @Component
@@ -56,11 +70,35 @@ public class AdminBot extends TelegramLongPollingBot {
     @Autowired
     private KnifeBot knifeBot;
     
+    @Autowired
+    private NavigationStackService navigationStackService;
+    
+    @Autowired
+    private BrandRepository brandRepository;
+    
+    @Autowired
+    private KnifeModelRepository knifeModelRepository;
+    
+    @Autowired
+    private KnifeRepository knifeRepository;
+    
+    @Autowired
+    private TransitiveAlternativesService transitiveAlternativesService;
+    
+    @Autowired
+    private SubmissionBufferRepository submissionBufferRepository;
+    
+    @Autowired
+    private MainMenuUpdateService mainMenuUpdateService;
+    
     // Хранилище состояний модерации для каждого чата
     private final java.util.Map<Long, ModerationState> moderationStates = new java.util.concurrent.ConcurrentHashMap<>();
     
     // Хранилище состояний поиска для каждого чата
     private final java.util.Map<Long, String> searchStates = new java.util.concurrent.ConcurrentHashMap<>();
+    
+    // Хранилище шагов ожидания фото для каждого чата (AdminBot-specific)
+    private final java.util.Map<Long, com.knifecerts.model.ConversationStep> adminPhotoSteps = new java.util.concurrent.ConcurrentHashMap<>();
     
     // Хранилище ID сообщений для каждого чата
     private final java.util.Map<Long, ChatMessages> chatMessages = new java.util.concurrent.ConcurrentHashMap<>();
@@ -93,7 +131,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 System.out.println("DEBUG ChatMessages: Added message " + id + " to list, size now: " + recentWindowMessages.size());
                 // Храним только последние 10
                 if (recentWindowMessages.size() > 10) {
-                    recentWindowMessages.remove(0);
+                    recentWindowMessages.removeFirst();
                 }
             }
         }
@@ -144,14 +182,20 @@ public class AdminBot extends TelegramLongPollingBot {
         private Integer promptMessageId;
         private String editingField; // "name", "brand", "index", "alt"
         private boolean isApprovedView; // true если это просмотр одобренного сертификата
+        private Set<Long> transitiveAlternativeIds; // ID транзитивных альтернатив
+        private Integer transitiveMessageId; // ID сообщения с предложением транзитивных альтернатив
+        private Long approvedKnifeId; // ID одобренного ножа (для поиска транзитивных)
+        private String photoPath; // Путь к фото (для прямой загрузки)
         
         public ModerationState(SubmissionBuffer original) {
             this.original = original;
             this.name = original.getModelName();
             this.brand = original.getBrandName();
             this.indexCode = original.getIndex();
-            this.alternativeModels = original.getAlternatives().stream()
-                .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " / " + alt.getBrandName() : ""))
+            // Parse alternatives from TEXT field
+            AlternativesParser parser = new AlternativesParserImpl("/");
+            this.alternativeModels = parser.parse(original.getAlternatives()).stream()
+                .map(alt -> alt.name() + (alt.brand() != null ? " / " + alt.brand() : ""))
                 .collect(java.util.stream.Collectors.toList());
             this.isApprovedView = false;
         }
@@ -167,6 +211,11 @@ public class AdminBot extends TelegramLongPollingBot {
             this.isApprovedView = isApprovedView;
         }
         
+        public ModerationState(Object original, boolean isApprovedView) {
+            this.original = original;
+            this.isApprovedView = isApprovedView;
+        }
+        
         // Проверка были ли изменения
         public boolean hasChanges() {
             if (original instanceof SubmissionBuffer) {
@@ -174,8 +223,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 String originalName = sub.getModelName();
                 String originalBrand = sub.getBrandName();
                 String originalIndex = sub.getIndex();
-                List<String> originalAlts = sub.getAlternatives().stream()
-                    .map(alt -> alt.getModelName() + (alt.getBrandName() != null ? " / " + alt.getBrandName() : ""))
+                AlternativesParser parser = new AlternativesParserImpl("/");
+                List<String> originalAlts = parser.parse(sub.getAlternatives()).stream()
+                    .map(alt -> alt.name() + (alt.brand() != null ? " / " + alt.brand() : ""))
                     .collect(java.util.stream.Collectors.toList());
                 
                 boolean nameChanged = !java.util.Objects.equals(originalName, name);
@@ -220,6 +270,26 @@ public class AdminBot extends TelegramLongPollingBot {
         public void setEditingField(String editingField) { this.editingField = editingField; }
         public boolean isApprovedView() { return isApprovedView; }
         public void setApprovedView(boolean approvedView) { this.isApprovedView = approvedView; }
+        public Set<Long> getTransitiveAlternativeIds() { return transitiveAlternativeIds; }
+        public void setTransitiveAlternativeIds(Set<Long> ids) { this.transitiveAlternativeIds = ids; }
+        public Integer getTransitiveMessageId() { return transitiveMessageId; }
+        public void setTransitiveMessageId(Integer messageId) { this.transitiveMessageId = messageId; }
+        public Long getApprovedKnifeId() { return approvedKnifeId; }
+        public void setApprovedKnifeId(Long knifeId) { this.approvedKnifeId = knifeId; }
+        
+        public String getPhotoPath() { return photoPath; }
+        public void setPhotoPath(String photoPath) { this.photoPath = photoPath; }
+        
+        private Long duplicateKnifeId; // ID дубликата ножа (если найден)
+        private Integer duplicateMessageId; // ID сообщения с предложением замены фото
+        private Integer confirmationMessageId; // ID сообщения-подтверждения альтернатив (Req 14.8)
+        
+        public Long getDuplicateKnifeId() { return duplicateKnifeId; }
+        public void setDuplicateKnifeId(Long knifeId) { this.duplicateKnifeId = knifeId; }
+        public Integer getDuplicateMessageId() { return duplicateMessageId; }
+        public void setDuplicateMessageId(Integer messageId) { this.duplicateMessageId = messageId; }
+        public Integer getConfirmationMessageId() { return confirmationMessageId; }
+        public void setConfirmationMessageId(Integer messageId) { this.confirmationMessageId = messageId; }
     }
 
     @Override
@@ -270,14 +340,6 @@ public class AdminBot extends TelegramLongPollingBot {
                         handleApproveCommand(chatId, moderatorId, messageText);
                     } else if (messageText.startsWith("/reject ")) {
                         handleRejectCommand(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/setname ")) {
-                        handleSetNameCommand(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/setbrand ")) {
-                        handleSetBrandCommand(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/setindex ")) {
-                        handleSetIndexCommand(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/setalt ")) {
-                        handleSetAltCommand(chatId, moderatorId, messageText);
                     } else {
                         // Проверяем, есть ли активное состояние поиска
                         if (searchStates.containsKey(chatId)) {
@@ -288,6 +350,20 @@ public class AdminBot extends TelegramLongPollingBot {
                                 // НОВОЕ: Удаляем сообщение пользователя
                                 deleteUserMessage(chatId, userMessageId);
                                 handleApprovedCommand(chatId, 0, messageText);
+                            } else if ("admin_search".equals(searchType)) {
+                                // Удаляем сообщение пользователя
+                                deleteUserMessage(chatId, userMessageId);
+                                List<Brand> brands = brandRepository.searchByName(messageText);
+                                if (brands.isEmpty()) {
+                                    sendMessage(chatId, "❌ Брендов не найдено");
+                                } else {
+                                    showAdminSearchResults(chatId, new ArrayList<>(brands), "brand", 0, messageText);
+                                }
+                            } else if (searchType.startsWith("admin_search_models_")) {
+                                // Удаляем сообщение пользователя
+                                deleteUserMessage(chatId, userMessageId);
+                                String brandName = searchType.substring(20);
+                                handleAdminSearchModelsInput(chatId, messageText, brandName);
                             } else if ("separator".equals(searchType)) {
                                 // НОВОЕ: Обработка изменения разделителя
                                 handleSeparatorInput(chatId, messageText, update.getMessage().getMessageId());
@@ -296,7 +372,13 @@ public class AdminBot extends TelegramLongPollingBot {
                             // Проверяем, есть ли активное состояние редактирования
                             ModerationState state = moderationStates.get(chatId);
                             if (state != null && state.getEditingField() != null) {
-                                handleModFieldInput(chatId, messageText, userMessageId);
+                                // Проверяем, ожидаем ли мы фото для загрузки
+                                com.knifecerts.model.ConversationStep adminStep = adminPhotoSteps.get(chatId);
+                                if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO) {
+                                    handleUploadFieldInput(chatId, messageText, userMessageId);
+                                } else {
+                                    handleModFieldInput(chatId, messageText, userMessageId);
+                                }
                             } else {
                                 sendMessage(chatId, "Неизвестная команда. Используйте /start для списка команд.");
                             }
@@ -310,7 +392,7 @@ public class AdminBot extends TelegramLongPollingBot {
             logger.severe("Неожиданная ошибка в AdminBot: " + e.getClass().getName() + " - " + e.getMessage());
             
             // Игнорируем сетевые ошибки Telegram API
-            if (e instanceof java.net.UnknownHostException || 
+            if (e instanceof java.net.UnknownHostException ||
                 e instanceof java.net.SocketTimeoutException ||
                 e.getCause() instanceof java.net.UnknownHostException ||
                 e.getCause() instanceof java.net.SocketTimeoutException) {
@@ -350,8 +432,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 handlePendingCommand(chatId);
             } else if (data.equals("menu_approved")) {
                 handleApprovedCommand(chatId, 0);
+            } else if (data.equals("menu_search")) {
+                handleAdminSearchRequest(chatId);
             } else if (data.equals("menu_upload")) {
-                sendMessage(chatId, "📤 Отправьте фото для загрузки на Яндекс.Диск");
+                // Начинаем процесс прямой загрузки сертификата (Req 15.1)
+                adminPhotoSteps.put(chatId, com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO);
+                sendMessage(chatId, "📤 Отправьте фото для прямой загрузки сертификата.\n\n" +
+                        "Формат: бренд/название/индекс или бренд/название или только название");
             } else if (data.equals("menu_error_log")) {
                 handleErrorLog(chatId);
             } else if (data.equals("menu_settings")) {
@@ -360,6 +447,24 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleChangeSeparatorRequest(chatId);
             } else if (data.equals("error_log_clear")) {
                 handleErrorLogClear(chatId);
+            } else if (data.equals("upload_edit_brand")) {
+                handleUploadEditField(chatId, "brand");
+            } else if (data.equals("upload_edit_name")) {
+                handleUploadEditField(chatId, "name");
+            } else if (data.equals("upload_edit_index")) {
+                handleUploadEditField(chatId, "index");
+            } else if (data.equals("upload_edit_alt")) {
+                handleUploadEditAlt(chatId);
+            } else if (data.equals("upload_save")) {
+                handleUploadSave(chatId);
+            } else if (data.equals("upload_add")) {
+                handleUploadAdd(chatId);
+            } else if (data.equals("upload_cancel")) {
+                handleUploadCancelRequest(chatId);
+            } else if (data.equals("upload_cancel_confirm")) {
+                handleUploadCancelConfirm(chatId);
+            } else if (data.equals("upload_cancel_no")) {
+                handleUploadCancelNo(chatId);
             } else if (data.equals("back_to_menu")) {
                 // Удаляем сообщение с кнопкой
                 try {
@@ -392,6 +497,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 searchStates.remove(chatId);
                 currentWindow.remove(chatId);
                 
+                // Очищаем навигационный стек до уровня 0
+                navigationStackService.clearFrom(chatId, 1);
+                
                 sendMainMenu(chatId);
             } else if (data.startsWith("view_approved_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
@@ -399,9 +507,6 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.startsWith("view_")) {
                 Long submissionId = Long.parseLong(data.substring(5));
                 showSubmissionDetails(chatId, submissionId);
-            } else if (data.startsWith("edit_")) {
-                Long submissionId = Long.parseLong(data.substring(5));
-                showEditMenu(chatId, submissionId);
             } else if (data.startsWith("approve_")) {
                 Long submissionId = Long.parseLong(data.substring(8));
                 handleApproveCallback(chatId, moderatorId, submissionId);
@@ -492,6 +597,73 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.startsWith("approved_cancel_")) {
                 Long submissionId = Long.parseLong(data.substring(16));
                 handleApprovedCancel(chatId, submissionId);
+            } else if (data.startsWith("approved_photo_cancel_")) {
+                Long knifeId = Long.parseLong(data.substring(22));
+                handleApprovedPhotoCancelRequest(chatId, knifeId);
+            } else if (data.startsWith("approved_photo_")) {
+                Long knifeId = Long.parseLong(data.substring(15));
+                handleApprovedPhotoRequest(chatId, knifeId);
+            } else if (data.startsWith("admin_brand_models_page_")) {
+                // Parse: admin_brand_models_page_N_brandName
+                String[] parts = data.substring(24).split("_", 2);
+                int page = Integer.parseInt(parts[0]);
+                String brandName = parts[1];
+                handleAdminBrandModelsPage(chatId, page, brandName);
+            } else if (data.equals("admin_brand_models_current_page")) {
+                // Ignore clicks on current page indicator
+            } else if (data.startsWith("admin_search_models_page_")) {
+                // Parse: admin_search_models_page_N_brandName_searchQuery
+                String[] parts = data.substring(25).split("_", 3);
+                int page = Integer.parseInt(parts[0]);
+                String brandName = parts[1];
+                String searchQuery = parts[2];
+                handleAdminSearchModelsPage(chatId, page, brandName, searchQuery);
+            } else if (data.equals("admin_search_models_current_page")) {
+                // Ignore clicks on current page indicator
+            } else if (data.startsWith("admin_search_models_")) {
+                String brandName = data.substring(19);
+                handleAdminSearchModelsRequest(chatId, brandName);
+            } else if (data.startsWith("admin_search_page_")) {
+                // Parse: admin_search_page_N_type where type is "brand" or "model"
+                String[] parts = data.substring(18).split("_");
+                int page = Integer.parseInt(parts[0]);
+                String type = parts[1];
+                String searchQuery = data.substring(18 + String.valueOf(page).length() + 1 + type.length() + 1);
+                handleAdminSearchPage(chatId, page, type, searchQuery);
+            } else if (data.equals("admin_search_current_page")) {
+                // Ignore clicks on current page indicator
+            } else if (data.startsWith("admin_search_brand_")) {
+                String brandName = data.substring(19);
+                handleAdminSearchBrandSelect(chatId, brandName);
+            } else if (data.startsWith("admin_search_model_")) {
+                Long modelId = Long.parseLong(data.substring(19));
+                handleAdminSearchModelSelect(chatId, modelId);
+            } else if (data.equals("admin_search_back")) {
+                handleAdminSearchRequest(chatId);
+            } else if (data.startsWith("transitive_yes_")) {
+                Long knifeId = Long.parseLong(data.substring(15));
+                handleTransitiveYes(chatId, knifeId);
+            } else if (data.startsWith("transitive_no_")) {
+                Long knifeId = Long.parseLong(data.substring(14));
+                handleTransitiveNo(chatId, knifeId);
+            } else if (data.startsWith("transitive_pending_yes_")) {
+                Long knifeId = Long.parseLong(data.substring(23));
+                handleTransitivePendingYes(chatId, knifeId);
+            } else if (data.startsWith("transitive_pending_no_")) {
+                Long knifeId = Long.parseLong(data.substring(22));
+                handleTransitivePendingNo(chatId, knifeId);
+            } else if (data.startsWith("alt_confirm_yes_")) {
+                Long submissionId = Long.parseLong(data.substring(16));
+                handleAltConfirmYes(chatId, submissionId);
+            } else if (data.startsWith("alt_confirm_no_")) {
+                Long submissionId = Long.parseLong(data.substring(15));
+                handleAltConfirmNo(chatId, submissionId);
+            } else if (data.startsWith("mod_replace_photo_yes_")) {
+                Long submissionId = Long.parseLong(data.substring(22));
+                handleDuplicatePhotoYes(chatId, submissionId);
+            } else if (data.startsWith("mod_replace_photo_no_")) {
+                Long submissionId = Long.parseLong(data.substring(21));
+                handleDuplicatePhotoNo(chatId, submissionId);
             }
             
             AnswerCallbackQuery answer = new AnswerCallbackQuery();
@@ -577,6 +749,103 @@ public class AdminBot extends TelegramLongPollingBot {
                 return;
             }
             
+            // Проверяем, ожидает ли AdminBot фото для замены/установки/загрузки
+            com.knifecerts.model.ConversationStep adminStep = adminPhotoSteps.get(chatId);
+            if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_REPLACEMENT_PHOTO ||
+                adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_SET_PHOTO ||
+                adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO) {
+                
+                adminPhotoSteps.remove(chatId);
+                
+                // Удаляем сообщение пользователя с фото
+                deleteUserMessage(chatId, update.getMessage().getMessageId());
+                
+                // Скачиваем фото из Telegram
+                GetFile getFileMethod = new GetFile();
+                getFileMethod.setFileId(photo.getFileId());
+                org.telegram.telegrambots.meta.api.objects.File file = execute(getFileMethod);
+                String fileUrl = "https://api.telegram.org/file/bot" + botToken + "/" + file.getFilePath();
+                
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                String newFileName = "photo_" + timestamp + ".jpg";
+                String newPath;
+                
+                try (java.io.InputStream photoStream = new java.net.URL(fileUrl).openStream()) {
+                    // Загружаем фото в app:/certificates/
+                    newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
+                }
+                
+                // Для ADMIN_WAITING_FOR_UPLOAD_PHOTO показываем форму добавления
+                if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO) {
+                    // Сохраняем путь к фото в состояние для последующего заполнения формы
+                    ModerationState state = moderationStates.get(chatId);
+                    if (state == null) {
+                        state = new ModerationState(null, false);
+                        moderationStates.put(chatId, state);
+                    }
+                    state.setPhotoPath(newPath);
+                    
+                    // Показываем форму добавления (Req 15.2)
+                    sendUploadForm(chatId, state);
+                    return;
+                }
+                
+                // Для замены/установки фото
+                ModerationState state = moderationStates.get(chatId);
+                if (state == null || state.getApprovedKnifeId() == null) {
+                    sendMessage(chatId, "❌ Состояние не найдено. Попробуйте снова.");
+                    return;
+                }
+                
+                Long knifeId = state.getApprovedKnifeId();
+                
+                Optional<Knife> knifeOpt = knifeRepository.findById(knifeId);
+                if (knifeOpt.isEmpty()) {
+                    sendMessage(chatId, "❌ Нож не найден");
+                    return;
+                }
+                Knife knife = knifeOpt.get();
+                
+                try (java.io.InputStream photoStream = new java.net.URL(fileUrl).openStream()) {
+                    if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_REPLACEMENT_PHOTO) {
+                        // Замена: переместить старое в app:/archive/replaced/, загрузить новое в app:/certificates/
+                        String oldPath = knife.getPhotoPath();
+                        if (oldPath != null && !oldPath.isEmpty()) {
+                            String archivedFileName = "photo_" + timestamp + "_" + knifeId + ".jpg";
+                            String archivePath = "app:/archive/replaced/" + archivedFileName;
+                            try {
+                                yandexDiskService.moveFile(oldPath, archivePath);
+                                logger.info("Старое фото перемещено в архив: " + archivePath);
+                            } catch (Exception e) {
+                                logger.warning("Не удалось переместить старое фото в архив: " + e.getMessage());
+                            }
+                        }
+                        // Загружаем новое фото в app:/certificates/
+                        newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
+                    } else {
+                        // Установка: загрузить в app:/certificates/
+                        newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
+                    }
+                }
+                
+                // Обновляем photo_path в knives
+                knife.setPhotoPath(newPath);
+                knifeRepository.save(knife);
+                
+                // Обновляем форму сертификата
+                sendMessage(chatId, "✅ Фото обновлено: " + newPath);
+                
+                // Пересоздаём ModerationState с обновлённым ножом
+                Integer oldFormMessageId = state.getFormMessageId();
+                moderationStates.put(chatId, new ModerationState(knife, true));
+                ModerationState newState = moderationStates.get(chatId);
+                newState.setFormMessageId(oldFormMessageId);
+                
+                sendApprovedSubmissionForm(chatId, knifeId);
+                return;
+            }
+            
+            // Старая логика для обычной загрузки фото (не для модерации)
             GetFile getFileMethod = new GetFile();
             getFileMethod.setFileId(photo.getFileId());
             org.telegram.telegrambots.meta.api.objects.File file = execute(getFileMethod);
@@ -586,7 +855,7 @@ public class AdminBot extends TelegramLongPollingBot {
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
             String fileName = "photo_" + timestamp + ".jpg";
             
-            try (InputStream photoStream = new URL(fileUrl).openStream()) {
+            try (InputStream photoStream = new java.net.URL(fileUrl).openStream()) {
                 String path = yandexDiskService.uploadPhoto(photoStream, fileName);
                 sendMessage(chatId, "✅ Фото успешно загружено!\nПуть: " + path);
             }
@@ -597,6 +866,73 @@ public class AdminBot extends TelegramLongPollingBot {
         }
     }
 
+    /**
+     * Обрабатывает нажатие кнопки фото в форме одобренного сертификата.
+     * Req 11.3: запрашивает новое фото у администратора.
+     * Req 11.1: кнопка с путём к файлу для замены.
+     * Req 11.2: кнопка "Установить фото" для модели без фото.
+     */
+    private void handleApprovedPhotoRequest(Long chatId, Long knifeId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        Knife knife = (Knife) state.getOriginal();
+        boolean hasPhoto = knife.getPhotoPath() != null && !knife.getPhotoPath().isEmpty();
+        
+        // Сохраняем ID ножа в состоянии для последующей обработки фото
+        state.setApprovedKnifeId(knifeId);
+        
+        // Устанавливаем шаг ожидания фото
+        if (hasPhoto) {
+            adminPhotoSteps.put(chatId, com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_REPLACEMENT_PHOTO);
+        } else {
+            adminPhotoSteps.put(chatId, com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_SET_PHOTO);
+        }
+        
+        String promptText = hasPhoto
+            ? "📷 Отправьте новое фото для замены существующего.\n\nСтарое фото будет перемещено в архив."
+            : "📷 Отправьте фото для установки сертификата.";
+        
+        try {
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(promptText);
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("❌ Отмена")
+                .callbackData("approved_photo_cancel_" + knifeId)
+                .build());
+            keyboard.add(row);
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            Message sent = execute(message);
+            state.setPromptMessageId(sent.getMessageId());
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при запросе фото: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Отменяет ожидание нового фото.
+     */
+    private void handleApprovedPhotoCancelRequest(Long chatId, Long knifeId) {
+        adminPhotoSteps.remove(chatId);
+        
+        ModerationState state = moderationStates.get(chatId);
+        if (state != null && state.getPromptMessageId() != null) {
+            deleteMessage(chatId, state.getPromptMessageId());
+            state.setPromptMessageId(null);
+        }
+    }
+    
     private void handlePendingCommand(Long chatId) {
         handlePendingCommand(chatId, 0);
     }
@@ -628,6 +964,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 // НОВОЕ: Сохраняем ID сообщения со списком
                 ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
                 messages.setPendingListMessageId(sent.getMessageId());
+                
+                // Устанавливаем список заявок на уровень 1 стека
+                navigationStackService.setLevel(chatId, 1, sent.getMessageId());
                 return;
             }
             
@@ -722,6 +1061,9 @@ public class AdminBot extends TelegramLongPollingBot {
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setPendingListMessageId(sent.getMessageId());
             messages.setLastWindowMessageId(sent.getMessageId());
+            
+            // Устанавливаем список заявок на уровень 1 стека
+            navigationStackService.setLevel(chatId, 1, sent.getMessageId());
             
         } catch (Exception e) {
             logger.severe("Ошибка при получении списка заявок: " + e.getMessage());
@@ -1052,12 +1394,14 @@ public class AdminBot extends TelegramLongPollingBot {
             caption.append("🏷️ Бренд: ").append(submission.getBrandName() != null ? submission.getBrandName() : "не указан").append("\n");
             caption.append("🔢 Индекс: ").append(submission.getIndex() != null ? submission.getIndex() : "не указан").append("\n\n");
             
-            if (!submission.getAlternatives().isEmpty()) {
+            String altStr = submission.getAlternatives();
+            if (altStr != null && !altStr.isEmpty()) {
                 caption.append("🔄 Альтернативные модели:\n");
-                for (var alt : submission.getAlternatives()) {
-                    caption.append("  • ").append(alt.getModelName());
-                    if (alt.getBrandName() != null) {
-                        caption.append(" / ").append(alt.getBrandName());
+                AlternativesParser parser = new AlternativesParserImpl("/");
+                for (var alt : parser.parse(altStr)) {
+                    caption.append("  • ").append(alt.name());
+                    if (alt.brand() != null) {
+                        caption.append(" / ").append(alt.brand());
                     }
                     caption.append("\n");
                 }
@@ -1295,29 +1639,37 @@ public class AdminBot extends TelegramLongPollingBot {
             .build());
         keyboard.add(row2);
         
-        // Третья строка
+        // Третья строка - поиск
         List<InlineKeyboardButton> row3 = new ArrayList<>();
         row3.add(InlineKeyboardButton.builder()
-            .text("📤 Загрузить фото")
-            .callbackData("menu_upload")
+            .text("🔍 Поиск")
+            .callbackData("menu_search")
             .build());
         keyboard.add(row3);
         
         // Четвертая строка
         List<InlineKeyboardButton> row4 = new ArrayList<>();
         row4.add(InlineKeyboardButton.builder()
-            .text("📋 Журнал ошибок")
-            .callbackData("menu_error_log")
+            .text("📤 Загрузить фото")
+            .callbackData("menu_upload")
             .build());
         keyboard.add(row4);
         
         // Пятая строка
         List<InlineKeyboardButton> row5 = new ArrayList<>();
         row5.add(InlineKeyboardButton.builder()
+            .text("📋 Журнал ошибок")
+            .callbackData("menu_error_log")
+            .build());
+        keyboard.add(row5);
+        
+        // Шестая строка
+        List<InlineKeyboardButton> row6 = new ArrayList<>();
+        row6.add(InlineKeyboardButton.builder()
             .text("⚙️ Настройки")
             .callbackData("menu_settings")
             .build());
-        keyboard.add(row5);
+        keyboard.add(row6);
         
         markup.setKeyboard(keyboard);
         message.setReplyMarkup(markup);
@@ -1326,6 +1678,9 @@ public class AdminBot extends TelegramLongPollingBot {
             Message sent = execute(message);
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setMainMenuMessageId(sent.getMessageId());
+            
+            // Устанавливаем главное меню на уровень 0 стека
+            navigationStackService.setLevel(chatId, 0, sent.getMessageId());
         } catch (TelegramApiException e) {
             logger.severe("Error sending menu: " + e.getMessage());
         }
@@ -1333,7 +1688,13 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void showSubmissionDetails(Long chatId, Long submissionId) {
         try {
-            SubmissionBuffer submission = submissionBufferService.getSubmissionByIdWithAlternatives(submissionId);
+            Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
+            if (!submissionOpt.isPresent()) {
+                sendMessage(chatId, "❌ Заявка не найдена");
+                return;
+            }
+            
+            SubmissionBuffer submission = submissionOpt.get();
             
             // Создаем временную копию для редактирования
             moderationStates.put(chatId, new ModerationState(submission));
@@ -1396,6 +1757,9 @@ public class AdminBot extends TelegramLongPollingBot {
             state.setFormMessageId(sentMessage.getMessageId());
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setLastWindowMessageId(sentMessage.getMessageId());
+            
+            // Устанавливаем форму модерации на уровень 2 стека
+            navigationStackService.setLevel(chatId, 2, sentMessage.getMessageId());
             
         } catch (Exception e) {
             logger.severe("Ошибка при отправке формы: " + e.getMessage());
@@ -1591,6 +1955,25 @@ public class AdminBot extends TelegramLongPollingBot {
         
         Knife knife = (Knife) state.getOriginal();
         
+        // Кнопка фото (Req 11.1, 11.2)
+        List<InlineKeyboardButton> photoRow = new ArrayList<>();
+        if (knife.getPhotoPath() != null && !knife.getPhotoPath().isEmpty()) {
+            String photoPathText = knife.getPhotoPath();
+            if (photoPathText.length() > 40) {
+                photoPathText = "..." + photoPathText.substring(photoPathText.length() - 37);
+            }
+            photoRow.add(InlineKeyboardButton.builder()
+                .text("📷 " + photoPathText)
+                .callbackData("approved_photo_" + submissionId)
+                .build());
+        } else {
+            photoRow.add(InlineKeyboardButton.builder()
+                .text("📷 Установить фото сертификата")
+                .callbackData("approved_photo_" + submissionId)
+                .build());
+        }
+        keyboard.add(photoRow);
+        
         // Кнопка названия
         String nameText = "🔪 Название: " + (state.getName() != null ? state.getName() : "не указано");
         List<InlineKeyboardButton> row1 = new ArrayList<>();
@@ -1628,13 +2011,15 @@ public class AdminBot extends TelegramLongPollingBot {
             .build());
         keyboard.add(row4);
         
-        // Кнопки действий
-        List<InlineKeyboardButton> row5 = new ArrayList<>();
-        row5.add(InlineKeyboardButton.builder()
-            .text("💾 Сохранить изменения")
-            .callbackData("approved_save_" + submissionId)
-            .build());
-        keyboard.add(row5);
+        // Кнопка сохранения — только если есть изменения (Req 11.7)
+        if (state.hasChanges()) {
+            List<InlineKeyboardButton> row5 = new ArrayList<>();
+            row5.add(InlineKeyboardButton.builder()
+                .text("💾 Сохранить изменения")
+                .callbackData("approved_save_" + submissionId)
+                .build());
+            keyboard.add(row5);
+        }
         
         List<InlineKeyboardButton> row6 = new ArrayList<>();
         row6.add(InlineKeyboardButton.builder()
@@ -1655,24 +2040,106 @@ public class AdminBot extends TelegramLongPollingBot {
         return markup;
     }
     
-    private void showEditMenu(Long chatId, Long submissionId) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
-    }
-    
-    private void handleSetNameCommand(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
-    }
-    
-    private void handleSetBrandCommand(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
-    }
-    
-    private void handleSetIndexCommand(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
-    }
-    
-    private void handleSetAltCommand(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
+    /**
+     * Показывает форму добавления сертификата после загрузки фото (Req 15.2).
+     * Запрашивает у пользователя: бренд, название, индекс, альтернативы.
+     */
+    private void sendUploadForm(Long chatId, ModerationState state) {
+        try {
+            // Удаляем предыдущее сообщение-запрос, если оно существует
+            if (state.getPromptMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getPromptMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete prompt: " + e.getMessage());
+                }
+            }
+            
+            // Формируем текст с инструкциями
+            StringBuilder text = new StringBuilder();
+            text.append("📝 Форма добавления сертификата\n\n");
+            text.append("Фото загружено: ✅\n");
+            text.append("Путь: ").append(state.getPhotoPath()).append("\n\n");
+            text.append("Отправьте данные в формате:\n");
+            text.append("`бренд/название/индекс` - для полного описания\n");
+            text.append("`бренд/название` - без индекса\n");
+            text.append("`название` - только название модели\n\n");
+            text.append("Или используйте кнопки для редактирования.");
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText(text.toString());
+            message.setParseMode("Markdown");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            // Кнопки для редактирования
+            List<InlineKeyboardButton> brandRow = new ArrayList<>();
+            brandRow.add(InlineKeyboardButton.builder()
+                .text("🏷️ Бренд: " + (state.getBrand() != null ? state.getBrand() : "не указан"))
+                .callbackData("upload_edit_brand")
+                .build());
+            keyboard.add(brandRow);
+            
+            List<InlineKeyboardButton> nameRow = new ArrayList<>();
+            nameRow.add(InlineKeyboardButton.builder()
+                .text("📝 Название: " + (state.getName() != null ? state.getName() : "не указано"))
+                .callbackData("upload_edit_name")
+                .build());
+            keyboard.add(nameRow);
+            
+            List<InlineKeyboardButton> indexRow = new ArrayList<>();
+            indexRow.add(InlineKeyboardButton.builder()
+                .text("🔢 Индекс: " + (state.getIndexCode() != null ? state.getIndexCode() : "не указан"))
+                .callbackData("upload_edit_index")
+                .build());
+            keyboard.add(indexRow);
+            
+            List<InlineKeyboardButton> altRow = new ArrayList<>();
+            altRow.add(InlineKeyboardButton.builder()
+                .text("🔄 Альтернативы: " + (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty() 
+                    ? state.getAlternativeModels().size() + " шт." : "нет"))
+                .callbackData("upload_edit_alt")
+                .build());
+            keyboard.add(altRow);
+            
+            // Кнопки действий
+            List<InlineKeyboardButton> actionRow = new ArrayList<>();
+            actionRow.add(InlineKeyboardButton.builder()
+                .text("💾 Сохранить")
+                .callbackData("upload_save")
+                .build());
+            actionRow.add(InlineKeyboardButton.builder()
+                .text("✅ Добавить")
+                .callbackData("upload_add")
+                .build());
+            keyboard.add(actionRow);
+            
+            List<InlineKeyboardButton> cancelRow = new ArrayList<>();
+            cancelRow.add(InlineKeyboardButton.builder()
+                .text("❌ Закрыть")
+                .callbackData("upload_cancel")
+                .build());
+            keyboard.add(cancelRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            Message sentMessage = execute(message);
+            state.setFormMessageId(sentMessage.getMessageId());
+            state.setPromptMessageId(null);
+            
+            // Сохраняем состояние для последующего редактирования
+            moderationStates.put(chatId, state);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при отправке формы добавления: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при создании формы добавления");
+        }
     }
     
     private void handleModEditField(Long chatId, Long submissionId, String field) {
@@ -1923,23 +2390,279 @@ public class AdminBot extends TelegramLongPollingBot {
                 : null);
             submission.setIndex(state.getIndexCode().trim());
             
-            // Обновляем альтернативы
-            submission.getAlternatives().clear();
-            if (state.getAlternativeModels() != null) {
-                for (String altStr : state.getAlternativeModels()) {
-                    String[] parts = altStr.split(" / ");
-                    if (parts.length >= 2) {
-                        String brandName = parts[0].trim();
-                        String modelName = parts[1].trim();
-                        
-                        com.knifecerts.model.BufferAlternative alt = new com.knifecerts.model.BufferAlternative(modelName, brandName);
-                        submission.addAlternative(alt);
-                    }
+            // Обновляем альтернативы (теперь как TEXT поле)
+            if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                StringBuilder altStr = new StringBuilder();
+                for (String alt : state.getAlternativeModels()) {
+                    if (altStr.length() > 0) altStr.append(", ");
+                    altStr.append(alt);
+                }
+                submission.setAlternatives(altStr.toString());
+            } else {
+                submission.setAlternatives(null);
+            }
+            
+            // Проверяем наличие дубликата (нож с совпадающими brand+name+index)
+            Optional<Knife> duplicateKnife = submissionBufferService.findDuplicateKnife(
+                submission.getBrandName(),
+                submission.getModelName(),
+                submission.getIndex()
+            );
+            
+            if (duplicateKnife.isPresent()) {
+                // Найден дубликат - предлагаем обновить фото существующего ножа
+                Knife existingKnife = duplicateKnife.get();
+                state.setDuplicateKnifeId(existingKnife.getId());
+                
+                String duplicateMessage = "⚠️ Найден существующий нож с такими же параметрами:\n\n" +
+                        "🔪 " + existingKnife.getDisplayName() + "\n\n" +
+                        "Хотите обновить фото существующего ножа вместо создания дубликата?";
+                
+                InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
+                List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+                
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                row.add(InlineKeyboardButton.builder()
+                    .text("✅ Обновить фото")
+                    .callbackData("mod_replace_photo_yes_" + submissionId)
+                    .build());
+                row.add(InlineKeyboardButton.builder()
+                    .text("❌ Создать новый")
+                    .callbackData("mod_replace_photo_no_" + submissionId)
+                    .build());
+                rows.add(row);
+                keyboard.setKeyboard(rows);
+                
+                SendMessage msg = new SendMessage();
+                msg.setChatId(chatId.toString());
+                msg.setText(duplicateMessage);
+                msg.setReplyMarkup(keyboard);
+                
+                Message sentMsg = executeAndTrack(msg);
+                state.setDuplicateMessageId(sentMsg.getMessageId());
+                
+                return;
+            }
+            
+            // Нет дубликата - проверяем наличие pending-альтернатив
+            List<String> pendingAlts = state.getAlternativeModels();
+            if (pendingAlts != null && !pendingAlts.isEmpty()) {
+                // Показываем шаг подтверждения альтернатив (Req 8.1)
+                showAltConfirmation(chatId, submissionId, pendingAlts, state);
+            } else {
+                // Нет альтернатив - пропускаем шаг подтверждения (Req 8.2)
+                approveSubmissionInternal(chatId, submissionId, submission, state);
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при одобрении: " + e.getMessage());
+            logError("Одобрение заявки #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Показывает сообщение-подтверждение со списком pending-альтернатив.
+     * Требование 8.1: отобразить список pending-альтернатив с кнопками [✅ Да, завершить] и [❌ Отмена].
+     */
+    private void showAltConfirmation(Long chatId, Long submissionId, List<String> pendingAlts, ModerationState state) {
+        try {
+            StringBuilder text = new StringBuilder();
+            text.append("📋 Подтверждение альтернатив\n\n");
+            text.append("Будут добавлены следующие альтернативы:\n\n");
+            for (String alt : pendingAlts) {
+                text.append("• ").append(alt).append("\n");
+            }
+            text.append("\nПодтвердить добавление?");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("✅ Да, завершить")
+                .callbackData("alt_confirm_yes_" + submissionId)
+                .build());
+            row.add(InlineKeyboardButton.builder()
+                .text("❌ Отмена")
+                .callbackData("alt_confirm_no_" + submissionId)
+                .build());
+            rows.add(row);
+            markup.setKeyboard(rows);
+            
+            SendMessage msg = new SendMessage();
+            msg.setChatId(chatId.toString());
+            msg.setText(text.toString());
+            msg.setReplyMarkup(markup);
+            
+            Message sentMsg = execute(msg);
+            state.setConfirmationMessageId(sentMsg.getMessageId());
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при показе подтверждения альтернатив: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Обработчик подтверждения альтернатив — [✅ Да, завершить].
+     * Требование 8.3: создать связи в alternatives и продолжить одобрение.
+     */
+    private void handleAltConfirmYes(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние модерации не найдено");
+            return;
+        }
+        
+        // Удаляем сообщение-подтверждение (Req 14.8)
+        if (state.getConfirmationMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getConfirmationMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation message: " + e.getMessage());
+            }
+            state.setConfirmationMessageId(null);
+        }
+        
+        SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
+        approveSubmissionInternal(chatId, submissionId, submission, state);
+    }
+    
+    /**
+     * Обработчик отмены одобрения — [❌ Отмена].
+     * Требование 8.4: отменить одобрение, вернуть форму модерации без изменений в БД.
+     */
+    private void handleAltConfirmNo(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние модерации не найдено");
+            return;
+        }
+        
+        // Удаляем сообщение-подтверждение (Req 14.8)
+        if (state.getConfirmationMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getConfirmationMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation message: " + e.getMessage());
+            }
+            state.setConfirmationMessageId(null);
+        }
+        
+        // Возвращаемся к форме модерации без изменений в БД (Req 8.4)
+        sendSubmissionForm(chatId, submissionId);
+    }
+    
+    private void handleDuplicatePhotoYes(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние модерации не найдено");
+            return;
+        }
+        
+        try {
+            SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
+            Long duplicateKnifeId = state.getDuplicateKnifeId();
+            
+            if (duplicateKnifeId == null) {
+                sendMessage(chatId, "❌ ID дубликата не найден");
+                return;
+            }
+            
+            // Удаляем сообщение с предложением
+            if (state.getDuplicateMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getDuplicateMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete duplicate message: " + e.getMessage());
                 }
             }
             
-            // Сохраняем изменения (через сервис, который имеет доступ к репозиторию)
-            // Просто одобряем заявку - она уже содержит обновленные данные
+            // Заменяем фото существующего ножа
+            submissionBufferService.replaceKnifePhoto(duplicateKnifeId, submission.getPhotoPath());
+            
+            // Удаляем форму
+            if (state.getFormMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getFormMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete form: " + e.getMessage());
+                }
+            }
+            
+            // Удаляем заявку из буфера
+            submissionBufferService.rejectSubmission(submissionId);
+            
+            // Очищаем состояние
+            moderationStates.remove(chatId);
+            
+            // Отправляем уведомление
+            sendMessage(chatId, "✅ Фото ножа #" + duplicateKnifeId + " успешно обновлено!");
+            
+            // Возвращаемся к списку
+            handlePendingCommand(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при замене фото: " + e.getMessage());
+            logError("Замена фото ножа", e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при замене фото: " + e.getMessage());
+        }
+    }
+    
+    private void handleDuplicatePhotoNo(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние модерации не найдено");
+            return;
+        }
+        
+        try {
+            SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
+            
+            // Удаляем сообщение с предложением
+            if (state.getDuplicateMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getDuplicateMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete duplicate message: " + e.getMessage());
+                }
+            }
+            
+            // Продолжаем одобрение — проверяем наличие pending-альтернатив
+            List<String> pendingAlts = state.getAlternativeModels();
+            if (pendingAlts != null && !pendingAlts.isEmpty()) {
+                showAltConfirmation(chatId, submissionId, pendingAlts, state);
+            } else {
+                approveSubmissionInternal(chatId, submissionId, submission, state);
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при одобрении: " + e.getMessage());
+            logError("Одобрение заявки #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
+        }
+    }
+    
+    private void approveSubmissionInternal(Long chatId, Long submissionId, 
+                                          SubmissionBuffer submission, ModerationState state) {
+        try {
+            // Одобряем заявку — создаём нож и его связи альтернатив
             Knife knife = submissionBufferService.approveSubmission(submissionId);
             
             // Удаляем форму
@@ -1966,12 +2689,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
             }
             
-            // Очищаем состояние
-            moderationStates.remove(chatId);
-            
-            // Отправляем уведомление
-            sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
-            
             // Уведомляем пользователя
             if (knifeBot != null) {
                 String userMessage = "✅ Ваша заявка #" + submission.getId() + " одобрена!\n\n" +
@@ -1979,13 +2696,171 @@ public class AdminBot extends TelegramLongPollingBot {
                 knifeBot.notifyUser(submission.getUserId(), userMessage);
             }
             
-            // Возвращаемся к списку
+            // Ищем транзитивные альтернативы (Req 9.1–9.5)
+            Set<Long> newAlternativeIds = knife.getAlternatives().stream()
+                .map(Knife::getId)
+                .collect(Collectors.toSet());
+            
+            if (!newAlternativeIds.isEmpty()) {
+                Set<Knife> transitiveAlternatives = transitiveAlternativesService.findTransitive(
+                    knife.getId(), newAlternativeIds);
+                
+                if (!transitiveAlternatives.isEmpty()) {
+                    // Сохраняем данные для шага транзитивных альтернатив
+                    state.setApprovedKnifeId(knife.getId());
+                    state.setTransitiveAlternativeIds(transitiveAlternatives.stream()
+                        .map(Knife::getId)
+                        .collect(Collectors.toSet()));
+                    
+                    // Показываем предложение транзитивных альтернатив (Req 9.2)
+                    showTransitiveAlternativesProposalForPending(chatId, knife.getId(), transitiveAlternatives, state);
+                    return;
+                }
+            }
+            
+            // Нет транзитивных альтернатив — завершаем (Req 9.5)
+            moderationStates.remove(chatId);
+            sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
             handlePendingCommand(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при одобрении: " + e.getMessage());
             logError("Одобрение заявки #" + submissionId, e.getMessage());
             sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Показывает предложение добавить транзитивные альтернативы после одобрения заявки.
+     * Требование 9.2: отобразить список транзитивных альтернатив с кнопками [✅ Да] и [❌ Нет].
+     */
+    private void showTransitiveAlternativesProposalForPending(Long chatId, Long knifeId,
+                                                               Set<Knife> transitiveAlternatives,
+                                                               ModerationState state) {
+        try {
+            StringBuilder message = new StringBuilder();
+            message.append("🔄 Найдены транзитивные альтернативы:\n\n");
+            
+            int count = 0;
+            for (Knife knife : transitiveAlternatives) {
+                if (count >= 10) {
+                    message.append("... и ещё ").append(transitiveAlternatives.size() - 10).append(" альтернатив");
+                    break;
+                }
+                message.append("• ").append(knife.getDisplayName()).append("\n");
+                count++;
+            }
+            
+            message.append("\n❓ Добавить прямые связи с этими альтернативами?");
+            
+            SendMessage sendMessage = new SendMessage();
+            sendMessage.setChatId(chatId.toString());
+            sendMessage.setText(message.toString());
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("✅ Да")
+                .callbackData("transitive_pending_yes_" + knifeId)
+                .build());
+            row.add(InlineKeyboardButton.builder()
+                .text("❌ Нет")
+                .callbackData("transitive_pending_no_" + knifeId)
+                .build());
+            keyboard.add(row);
+            
+            markup.setKeyboard(keyboard);
+            sendMessage.setReplyMarkup(markup);
+            
+            Message sent = execute(sendMessage);
+            state.setTransitiveMessageId(sent.getMessageId());
+            
+        } catch (Exception e) {
+            logger.severe("Error showing transitive alternatives proposal for pending: " + e.getMessage());
+            // Если не удалось показать предложение — просто завершаем
+            moderationStates.remove(chatId);
+            handlePendingCommand(chatId);
+        }
+    }
+    
+    /**
+     * Обработчик [✅ Да] для транзитивных альтернатив после одобрения заявки.
+     * Требование 9.3: создать прямые связи между одобренным сертификатом и всеми транзитивными альтернативами.
+     */
+    private void handleTransitivePendingYes(Long chatId, Long knifeId) {
+        try {
+            ModerationState state = moderationStates.get(chatId);
+            if (state == null) {
+                sendMessage(chatId, "❌ Состояние не найдено");
+                return;
+            }
+            
+            Set<Long> transitiveIds = state.getTransitiveAlternativeIds();
+            if (transitiveIds == null || transitiveIds.isEmpty()) {
+                sendMessage(chatId, "❌ Транзитивные альтернативы не найдены");
+                moderationStates.remove(chatId);
+                handlePendingCommand(chatId);
+                return;
+            }
+            
+            // Получаем нож и добавляем транзитивные альтернативы (Req 9.3)
+            Optional<Knife> knifeOpt = knifeRepository.findById(knifeId);
+            if (knifeOpt.isEmpty()) {
+                sendMessage(chatId, "❌ Нож не найден");
+                moderationStates.remove(chatId);
+                handlePendingCommand(chatId);
+                return;
+            }
+            
+            Knife knife = knifeOpt.get();
+            for (Long transitiveId : transitiveIds) {
+                Optional<Knife> transitiveOpt = knifeRepository.findById(transitiveId);
+                if (transitiveOpt.isPresent()) {
+                    Knife transitiveKnife = transitiveOpt.get();
+                    if (!knife.getAlternatives().contains(transitiveKnife)) {
+                        knife.addAlternative(transitiveKnife);
+                    }
+                }
+            }
+            knifeRepository.save(knife);
+            
+            // Удаляем сообщение с предложением (Req 14.9)
+            if (state.getTransitiveMessageId() != null) {
+                deleteMessage(chatId, state.getTransitiveMessageId());
+            }
+            
+            moderationStates.remove(chatId);
+            sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
+            handlePendingCommand(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Error handling transitive pending yes: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при добавлении транзитивных альтернатив: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Обработчик [❌ Нет] для транзитивных альтернатив после одобрения заявки.
+     * Требование 9.4: пропустить добавление транзитивных альтернатив и продолжить.
+     */
+    private void handleTransitivePendingNo(Long chatId, Long knifeId) {
+        try {
+            ModerationState state = moderationStates.get(chatId);
+            
+            // Удаляем сообщение с предложением (Req 14.9)
+            if (state != null && state.getTransitiveMessageId() != null) {
+                deleteMessage(chatId, state.getTransitiveMessageId());
+            }
+            
+            moderationStates.remove(chatId);
+            sendMessage(chatId, "✅ Заявка одобрена!");
+            handlePendingCommand(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Error handling transitive pending no: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка: " + e.getMessage());
         }
     }
     
@@ -2228,6 +3103,356 @@ public class AdminBot extends TelegramLongPollingBot {
         }
     }
     
+    // ─── Обработчики формы прямой загрузки (Req 17.1–17.5) ──────────────────
+    
+    /**
+     * Начинает редактирование поля в форме прямой загрузки.
+     */
+    private void handleUploadEditField(Long chatId, String field) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        state.setEditingField(field);
+        
+        // Удаляем предыдущее сообщение-запрос, если оно существует
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete prompt: " + e.getMessage());
+            }
+        }
+        
+        // Запрашиваем ввод
+        String promptText;
+        if ("brand".equals(field)) {
+            promptText = "✏️ Отправьте название бренда:";
+        } else if ("name".equals(field)) {
+            promptText = "✏️ Отправьте название модели:";
+        } else if ("index".equals(field)) {
+            promptText = "✏️ Отправьте индекс (или отправьте пустое сообщение):";
+        } else {
+            promptText = "✏️ Отправьте данные:";
+        }
+        
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText(promptText);
+        
+        try {
+            Message sent = execute(message);
+            state.setPromptMessageId(sent.getMessageId());
+            moderationStates.put(chatId, state);
+        } catch (Exception e) {
+            logger.severe("Ошибка при запросе ввода: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Начинает редактирование альтернатив в форме прямой загрузки.
+     */
+    private void handleUploadEditAlt(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        state.setEditingField("alt");
+        
+        // Удаляем предыдущее сообщение-запрос, если оно существует
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete prompt: " + e.getMessage());
+            }
+        }
+        
+        // Запрашиваем ввод альтернатив
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText("✏️ Отправьте альтернативные модели через запятую:\n" +
+                "Формат: `название` или `бренд/название`\n" +
+                "Пример: `Модель1, Бренд2/Модель2`");
+        message.setParseMode("Markdown");
+        
+        try {
+            Message sent = execute(message);
+            state.setPromptMessageId(sent.getMessageId());
+            moderationStates.put(chatId, state);
+        } catch (Exception e) {
+            logger.severe("Ошибка при запросе альтернатив: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Обрабатывает ввод в форме прямой загрузки.
+     * Использует handleModFieldInput для обновления состояния.
+     */
+    private void handleUploadFieldInput(Long chatId, String text, Integer userMessageId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null || state.getEditingField() == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        // Используем handleModFieldInput для обновления состояния
+        handleModFieldInput(chatId, text, userMessageId);
+        
+        // Обновляем форму
+        sendUploadForm(chatId, state);
+    }
+    
+    /**
+     * Сохраняет данные в submissions_buffer (Req 15.5).
+     */
+    private void handleUploadSave(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        try {
+            // Создаем запись в submissions_buffer
+            SubmissionBuffer submission = new SubmissionBuffer(
+                0L, // user_id будет установлен при обработке
+                "admin",
+                state.getName(),
+                state.getBrand(),
+                state.getPhotoPath()
+            );
+            submission.setIndex(state.getIndexCode());
+            
+            // Формируем строку альтернатив
+            if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                AlternativesParser parser = new AlternativesParserImpl(",");
+                List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
+                    .map(alt -> {
+                        String[] parts = alt.split(" / ");
+                        if (parts.length == 2) {
+                            return new AlternativeEntry(parts[1].trim(), parts[0].trim());
+                        } else {
+                            return new AlternativeEntry(parts[0].trim(), null);
+                        }
+                    })
+                    .collect(java.util.stream.Collectors.toList());
+                String altStr = alternatives.stream()
+                    .map(alt -> alt.brand() != null ? alt.brand() + "/" + alt.name() : alt.name())
+                    .collect(java.util.stream.Collectors.joining(", "));
+                submission.setAlternatives(altStr);
+            }
+            
+            submission = submissionBufferRepository.save(submission);
+            
+            sendMessage(chatId, "✅ Данные сохранены в буфере!\n" +
+                    "ID заявки: #" + submission.getId() + "\n" +
+                    "Ожидает одобрения модератором.");
+            
+            // Очищаем состояние
+            moderationStates.remove(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при сохранении: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при сохранении: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Добавляет сертификат напрямую в knives (Req 15.6, 15.7).
+     */
+    private void handleUploadAdd(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        try {
+            // Создаем или находим бренд и модель
+            Brand brand = brandRepository.findByName(state.getBrand())
+                .orElseGet(() -> brandRepository.save(new Brand(state.getBrand())));
+            KnifeModel model = knifeModelRepository.findByName(state.getName())
+                .orElseGet(() -> knifeModelRepository.save(new KnifeModel(state.getName())));
+            
+            // Создаем запись в knives
+            Knife knife = new Knife(model, brand, state.getIndexCode(), state.getPhotoPath());
+            knife = knifeRepository.save(knife);
+            
+            // Обрабатываем альтернативы
+            if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                AlternativesParser parser = new AlternativesParserImpl(",");
+                List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
+                    .map(alt -> {
+                        String[] parts = alt.split(" / ");
+                        if (parts.length == 2) {
+                            return new AlternativeEntry(parts[1].trim(), parts[0].trim());
+                        } else {
+                            return new AlternativeEntry(parts[0].trim(), null);
+                        }
+                    })
+                    .collect(java.util.stream.Collectors.toList());
+                
+                for (AlternativeEntry altEntry : alternatives) {
+                    Brand altBrand = brandRepository.findByName(altEntry.brand())
+                        .orElseGet(() -> brandRepository.save(new Brand(altEntry.brand())));
+                    KnifeModel altModel = knifeModelRepository.findByName(altEntry.name())
+                        .orElseGet(() -> knifeModelRepository.save(new KnifeModel(altEntry.name())));
+                    
+                    Optional<Knife> existingKnife = knifeRepository.findByModelAndBrand(altModel, altBrand);
+                    Knife alternativeKnife;
+                    
+                    if (existingKnife.isPresent()) {
+                        alternativeKnife = existingKnife.get();
+                    } else {
+                        alternativeKnife = new Knife(altModel, altBrand, null, null);
+                        alternativeKnife = knifeRepository.save(alternativeKnife);
+                    }
+                    
+                    knife.addAlternative(alternativeKnife);
+                }
+            }
+            
+            knifeRepository.save(knife);
+            
+            sendMessage(chatId, "✅ Сертификат добавлен!\n" +
+                    "ID ножа: #" + knife.getId() + "\n" +
+                    "Путь к фото: " + state.getPhotoPath());
+            
+            // Обновляем меню если был создан новый бренд
+            if (brandRepository.findByName(state.getBrand()).isEmpty()) {
+                mainMenuUpdateService.updateAllUserMenus();
+            }
+            
+            // Очищаем состояние
+            moderationStates.remove(chatId);
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при добавлении: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при добавлении: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Запрашивает подтверждение закрытия формы (Req 15.8).
+     */
+    private void handleUploadCancelRequest(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        // Удаляем форму
+        if (state.getFormMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getFormMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete form: " + e.getMessage());
+            }
+            state.setFormMessageId(null);
+        }
+        
+        // Показываем подтверждение
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText("❓ Вы уверены, что хотите закрыть форму? Все несохраненные данные будут потеряны.");
+        
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        row.add(InlineKeyboardButton.builder()
+            .text("✅ Да, закрыть")
+            .callbackData("upload_cancel_confirm")
+            .build());
+        row.add(InlineKeyboardButton.builder()
+            .text("❌ Нет, продолжить")
+            .callbackData("upload_cancel_no")
+            .build());
+        keyboard.add(row);
+        
+        markup.setKeyboard(keyboard);
+        message.setReplyMarkup(markup);
+        
+        try {
+            Message sent = execute(message);
+            state.setPromptMessageId(sent.getMessageId());
+            moderationStates.put(chatId, state);
+        } catch (Exception e) {
+            logger.severe("Ошибка при запросе подтвержден��я: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Подтверждает закрытие формы.
+     */
+    private void handleUploadCancelConfirm(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        // Удаляем подтверждение
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation: " + e.getMessage());
+            }
+            state.setPromptMessageId(null);
+        }
+        
+        // Очищаем состояние
+        moderationStates.remove(chatId);
+        
+        sendMessage(chatId, "✅ Форма закрыта.");
+    }
+    
+    /**
+     * Отменяет закрытие формы.
+     */
+    private void handleUploadCancelNo(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        // Удаляем подтверждение
+        if (state.getPromptMessageId() != null) {
+            try {
+                DeleteMessage deleteMsg = new DeleteMessage();
+                deleteMsg.setChatId(chatId.toString());
+                deleteMsg.setMessageId(state.getPromptMessageId());
+                execute(deleteMsg);
+            } catch (Exception e) {
+                logger.warning("Failed to delete confirmation: " + e.getMessage());
+            }
+            state.setPromptMessageId(null);
+        }
+        
+        // Показываем форму снова
+        sendUploadForm(chatId, state);
+    }
+    
     private void handleApprovedSave(Long chatId, Long submissionId) {
         ModerationState state = moderationStates.get(chatId);
         if (state == null) {
@@ -2297,14 +3522,79 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
             }
             
-            // TODO: Реализовать сохранение изменений в одобренных сертификатах
-            sendMessage(chatId, "⚠️ Редактирование одобренных сертификатов пока не реализовано в новой схеме");
+            // Получаем одобренный нож
+            Knife knife = (Knife) state.getOriginal();
+            Long knifeId = knife.getId();
             
+            // Сохраняем текстовые поля
+            if (state.getName() != null && !state.getName().isEmpty()) {
+                knife.getModel().setName(state.getName());
+            }
+            if (state.getBrand() != null && !state.getBrand().isEmpty()) {
+                knife.getBrand().setName(state.getBrand());
+            }
+            if (state.getIndexCode() != null && !state.getIndexCode().isEmpty()) {
+                knife.setIndex(state.getIndexCode());
+            }
+            
+            // Обрабатываем новые альтернативы
+            Set<Long> newAlternativeIds = new HashSet<>();
+            if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                AlternativesParser parser = new AlternativesParserImpl("/");
+                
+                for (String altStr : state.getAlternativeModels()) {
+                    List<AlternativeEntry> entries = parser.parse(altStr);
+                    for (AlternativeEntry entry : entries) {
+                        Brand altBrand = findOrCreateBrand(entry.brand());
+                        KnifeModel altModel = findOrCreateKnifeModel(entry.name());
+                        
+                        Optional<Knife> existingKnife = knifeRepository.findByModelAndBrand(altModel, altBrand);
+                        Knife altKnife;
+                        
+                        if (existingKnife.isPresent()) {
+                            altKnife = existingKnife.get();
+                        } else {
+                            altKnife = new Knife(altModel, altBrand, null, null);
+                            altKnife = knifeRepository.save(altKnife);
+                        }
+                        
+                        // Добавляем альтернативу если её ещё нет
+                        if (!knife.getAlternatives().contains(altKnife)) {
+                            knife.addAlternative(altKnife);
+                            newAlternativeIds.add(altKnife.getId());
+                        }
+                    }
+                }
+            }
+            
+            // Сохраняем изменения
+            knifeRepository.save(knife);
+            
+            // Если были добавлены новые альтернативы, ищем транзитивные
+            if (!newAlternativeIds.isEmpty()) {
+                Set<Knife> transitiveAlternatives = transitiveAlternativesService.findTransitive(knifeId, newAlternativeIds);
+                
+                if (!transitiveAlternatives.isEmpty()) {
+                    // Сохраняем транзитивные альтернативы в состояние
+                    state.setTransitiveAlternativeIds(transitiveAlternatives.stream()
+                        .map(Knife::getId)
+                        .collect(Collectors.toSet()));
+                    
+                    // Показываем предложение транзитивных альтернатив
+                    showTransitiveAlternativesProposal(chatId, knifeId, transitiveAlternatives);
+                    return;
+                }
+            }
+            
+            // Если нет транзитивных альтернатив, просто завершаем
+            sendMessage(chatId, "✅ Изменения сохранены!");
             moderationStates.remove(chatId);
+            handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
             logger.severe("Ошибка при сохранении изменений: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при сохранении изменений");
+            logError("Сохранение одобренного сертификата #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при сохранении изменений: " + e.getMessage());
         }
     }
     
@@ -2456,6 +3746,355 @@ public class AdminBot extends TelegramLongPollingBot {
     private void handleApprovedSearchRequest(Long chatId) {
         searchStates.put(chatId, "approved");
         sendMessage(chatId, "🔍 Введите название или индекс для поиска:");
+    }
+
+    private void handleAdminSearchRequest(Long chatId) {
+        searchStates.put(chatId, "admin_search");
+        sendMessage(chatId, "🔍 Введите название бренда для поиска:");
+    }
+
+    private void handleAdminSearchPage(Long chatId, int page, String type, String searchQuery) {
+        try {
+            List<?> results;
+            if ("brand".equals(type)) {
+                results = new ArrayList<>(brandRepository.searchByName(searchQuery));
+            } else {
+                results = new ArrayList<>(knifeModelRepository.searchByName(searchQuery));
+            }
+            
+            showAdminSearchResults(chatId, results, type, page, searchQuery);
+        } catch (Exception e) {
+            logger.severe("Error handling search page: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при поиске");
+        }
+    }
+
+    private void handleAdminSearchBrandSelect(Long chatId, String brandName) {
+        try {
+            List<KnifeModel> models = knifeModelRepository.findByBrand(brandName);
+            if (models.isEmpty()) {
+                sendMessage(chatId, "❌ Моделей не найдено");
+            } else {
+                showAdminBrandModels(chatId, brandName, new ArrayList<>(models), 0);
+            }
+        } catch (Exception e) {
+            logger.severe("Error selecting brand: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при выборе бренда");
+        }
+    }
+
+    private void showAdminBrandModels(Long chatId, String brandName, List<KnifeModel> models, int page) {
+        try {
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) models.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            page = ((page % totalPages) + totalPages) % totalPages;
+            
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, models.size());
+            List<KnifeModel> pageModels = models.subList(startIndex, endIndex);
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🏷️ " + brandName + "\n\nВсего: " + models.size() + " моделей");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            for (KnifeModel model : pageModels) {
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                String name = model.getName();
+                if (name.length() > 40) {
+                    name = name.substring(0, 37) + "...";
+                }
+                
+                row.add(InlineKeyboardButton.builder()
+                    .text(name)
+                    .callbackData("admin_search_model_" + model.getId())
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
+                int nextPage = (page + 1) % totalPages;
+                
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData("admin_brand_models_page_" + prevPage + "_" + brandName)
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("admin_brand_models_current_page")
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData("admin_brand_models_page_" + nextPage + "_" + brandName)
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            List<InlineKeyboardButton> actionRow = new ArrayList<>();
+            actionRow.add(InlineKeyboardButton.builder()
+                .text("🔍 Поиск")
+                .callbackData("admin_search_models_" + brandName)
+                .build());
+            keyboard.add(actionRow);
+            
+            List<InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Назад")
+                .callbackData("admin_search_back")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Error showing brand models: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении моделей");
+        }
+    }
+
+    private void handleAdminSearchModelsRequest(Long chatId, String brandName) {
+        searchStates.put(chatId, "admin_search_models_" + brandName);
+        sendMessage(chatId, "🔍 Введите название модели для поиска:");
+    }
+
+    private void handleAdminSearchModelsInput(Long chatId, String searchQuery, String brandName) {
+        try {
+            List<KnifeModel> allModels = knifeModelRepository.findByBrand(brandName);
+            List<KnifeModel> filteredModels = allModels.stream()
+                .filter(m -> m.getName().toLowerCase().contains(searchQuery.toLowerCase()))
+                .collect(Collectors.toList());
+            
+            if (filteredModels.isEmpty()) {
+                sendMessage(chatId, "❌ Моделей не найдено");
+            } else {
+                showAdminSearchModelResults(chatId, brandName, filteredModels, 0, searchQuery);
+            }
+        } catch (Exception e) {
+            logger.severe("Error handling search models input: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при поиске");
+        }
+    }
+
+    private void showAdminSearchModelResults(Long chatId, String brandName, List<KnifeModel> models, int page, String searchQuery) {
+        try {
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) models.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            page = ((page % totalPages) + totalPages) % totalPages;
+            
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, models.size());
+            List<KnifeModel> pageModels = models.subList(startIndex, endIndex);
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🔍 Результаты поиска (" + models.size() + " найдено)");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            for (KnifeModel model : pageModels) {
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                String name = model.getName();
+                if (name.length() > 40) {
+                    name = name.substring(0, 37) + "...";
+                }
+                
+                row.add(InlineKeyboardButton.builder()
+                    .text(name)
+                    .callbackData("admin_search_model_" + model.getId())
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
+                int nextPage = (page + 1) % totalPages;
+                
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData("admin_search_models_page_" + prevPage + "_" + brandName + "_" + searchQuery)
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("admin_search_models_current_page")
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData("admin_search_models_page_" + nextPage + "_" + brandName + "_" + searchQuery)
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            List<InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Назад")
+                .callbackData("admin_search_back")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Error showing search model results: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении результатов");
+        }
+    }
+
+    private void handleAdminSearchModelSelect(Long chatId, Long modelId) {
+        try {
+            Optional<KnifeModel> modelOpt = knifeModelRepository.findById(modelId);
+            if (modelOpt.isPresent()) {
+                KnifeModel model = modelOpt.get();
+                List<Knife> knives = knifeRepository.findByModelId(modelId);
+                
+                StringBuilder sb = new StringBuilder();
+                sb.append("📋 Модель: ").append(model.getName()).append("\n\n");
+                
+                if (knives.isEmpty()) {
+                    sb.append("❌ Нет сертификатов для этой модели");
+                } else {
+                    sb.append("Сертификаты:\n");
+                    for (Knife knife : knives) {
+                        sb.append("• ").append(knife.getBrand().getName()).append(" / ").append(model.getName());
+                        if (knife.getIndex() != null && !knife.getIndex().isEmpty()) {
+                            sb.append(" / ").append(knife.getIndex());
+                        }
+                        sb.append("\n");
+                    }
+                }
+                
+                sendMessage(chatId, sb.toString());
+            } else {
+                sendMessage(chatId, "❌ Модель не найдена");
+            }
+        } catch (Exception e) {
+            logger.severe("Error selecting model: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при выборе модели");
+        }
+    }
+
+    private void showAdminSearchResults(Long chatId, List<?> results, String type, int page, String searchQuery) {
+        try {
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) results.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            page = ((page % totalPages) + totalPages) % totalPages;
+            
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, results.size());
+            List<?> pageResults = results.subList(startIndex, endIndex);
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🔍 Результаты поиска (" + results.size() + " найдено)");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            for (Object result : pageResults) {
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                String name;
+                String callbackData;
+                
+                if (type.equals("brand")) {
+                    Brand brand = (Brand) result;
+                    name = brand.getName();
+                    callbackData = "admin_search_brand_" + brand.getName();
+                } else {
+                    KnifeModel model = (KnifeModel) result;
+                    name = model.getName();
+                    callbackData = "admin_search_model_" + model.getId();
+                }
+                
+                if (name.length() > 40) {
+                    name = name.substring(0, 37) + "...";
+                }
+                
+                row.add(InlineKeyboardButton.builder()
+                    .text(name)
+                    .callbackData(callbackData)
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
+                int nextPage = (page + 1) % totalPages;
+                
+                String pageCallbackPrefix = "admin_search_page_" + prevPage + "_" + type + "_" + searchQuery;
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData(pageCallbackPrefix)
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("admin_search_current_page")
+                    .build());
+                
+                pageCallbackPrefix = "admin_search_page_" + nextPage + "_" + type + "_" + searchQuery;
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData(pageCallbackPrefix)
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            List<InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Назад")
+                .callbackData("admin_search_back")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Error showing search results: " + e.getMessage());
+        }
+    }
+    
+    private void handleAdminBrandModelsPage(Long chatId, int page, String brandName) {
+        try {
+            List<KnifeModel> models = knifeModelRepository.findByBrand(brandName);
+            showAdminBrandModels(chatId, brandName, models, page);
+        } catch (Exception e) {
+            logger.severe("Error handling brand models page: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при отображении моделей");
+        }
+    }
+
+    private void handleAdminSearchModelsPage(Long chatId, int page, String brandName, String searchQuery) {
+        try {
+            List<KnifeModel> allModels = knifeModelRepository.findByBrand(brandName);
+            List<KnifeModel> filteredModels = allModels.stream()
+                .filter(m -> m.getName().toLowerCase().contains(searchQuery.toLowerCase()))
+                .collect(Collectors.toList());
+            
+            showAdminSearchModelResults(chatId, brandName, filteredModels, page, searchQuery);
+        } catch (Exception e) {
+            logger.severe("Error handling search models page: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при поиске");
+        }
     }
     
     private void logError(String operation, String error) {
@@ -2810,5 +4449,199 @@ public class AdminBot extends TelegramLongPollingBot {
         } catch (TelegramApiException e) {
             logger.severe("Error sending settings: " + e.getMessage());
         }
+    }
+    
+    /**
+     * Обработчик подтверждения добавления транзитивных альтернатив.
+     * Требование 9.7: При добавлении альтернативы к одобренному сертификату через редактирование
+     * система должна запустить поиск транзитивных альтернатив и предложить их модератору.
+     * 
+     * @param chatId ID чата
+     * @param knifeId ID ножа
+     */
+    private void handleTransitiveYes(Long chatId, Long knifeId) {
+        try {
+            ModerationState state = moderationStates.get(chatId);
+            if (state == null) {
+                sendMessage(chatId, "❌ Состояние не найдено");
+                return;
+            }
+            
+            Set<Long> transitiveIds = state.getTransitiveAlternativeIds();
+            if (transitiveIds == null || transitiveIds.isEmpty()) {
+                sendMessage(chatId, "❌ Транзитивные альтернативы не найдены");
+                return;
+            }
+            
+            // Получаем нож и добавляем транзитивные альтернативы
+            Optional<Knife> knifeOpt = knifeRepository.findById(knifeId);
+            if (knifeOpt.isEmpty()) {
+                sendMessage(chatId, "❌ Нож не найден");
+                return;
+            }
+            
+            Knife knife = knifeOpt.get();
+            
+            // Добавляем все транзитивные альтернативы
+            for (Long transitiveId : transitiveIds) {
+                Optional<Knife> transitiveOpt = knifeRepository.findById(transitiveId);
+                if (transitiveOpt.isPresent()) {
+                    Knife transitiveKnife = transitiveOpt.get();
+                    if (!knife.getAlternatives().contains(transitiveKnife)) {
+                        knife.addAlternative(transitiveKnife);
+                    }
+                }
+            }
+            
+            knifeRepository.save(knife);
+            
+            // Удаляем сообщение с предложением
+            if (state.getTransitiveMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getTransitiveMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete transitive message: " + e.getMessage());
+                }
+            }
+            
+            sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
+            moderationStates.remove(chatId);
+            handleApprovedCommand(chatId, 0);
+            
+        } catch (Exception e) {
+            logger.severe("Error handling transitive yes: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при добавлении транзитивных альтернатив: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Обработчик отклонения добавления транзитивных альтернатив.
+     * 
+     * @param chatId ID чата
+     * @param knifeId ID ножа
+     */
+    private void handleTransitiveNo(Long chatId, Long knifeId) {
+        try {
+            ModerationState state = moderationStates.get(chatId);
+            if (state == null) {
+                sendMessage(chatId, "❌ Состояние не найдено");
+                return;
+            }
+            
+            // Удаляем сообщение с предложением
+            if (state.getTransitiveMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getTransitiveMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete transitive message: " + e.getMessage());
+                }
+            }
+            
+            sendMessage(chatId, "✅ Изменения сохранены!");
+            moderationStates.remove(chatId);
+            handleApprovedCommand(chatId, 0);
+            
+        } catch (Exception e) {
+            logger.severe("Error handling transitive no: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Показывает предложение добавить транзитивные альтернативы.
+     * Требование 9.7: При добавлении альтернативы к одобренному сертификату через редактирование
+     * система должна запустить поиск транзитивных альтернатив и предложить их модератору.
+     * 
+     * @param chatId ID чата
+     * @param knifeId ID ножа
+     * @param transitiveAlternatives Множество найденных транзитивных альтернатив
+     */
+    private void showTransitiveAlternativesProposal(Long chatId, Long knifeId, Set<Knife> transitiveAlternatives) {
+        try {
+            StringBuilder message = new StringBuilder();
+            message.append("🔄 Найдены транзитивные альтернативы:\n\n");
+            
+            int count = 0;
+            for (Knife knife : transitiveAlternatives) {
+                if (count >= 10) {
+                    message.append("... и ещё ").append(transitiveAlternatives.size() - 10).append(" альтернатив");
+                    break;
+                }
+                message.append("• ").append(knife.getDisplayName()).append("\n");
+                count++;
+            }
+            
+            message.append("\n❓ Добавить эти альтернативы?");
+            
+            SendMessage sendMessage = new SendMessage();
+            sendMessage.setChatId(chatId.toString());
+            sendMessage.setText(message.toString());
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            row.add(InlineKeyboardButton.builder()
+                .text("✅ Да")
+                .callbackData("transitive_yes_" + knifeId)
+                .build());
+            row.add(InlineKeyboardButton.builder()
+                .text("❌ Нет")
+                .callbackData("transitive_no_" + knifeId)
+                .build());
+            keyboard.add(row);
+            
+            markup.setKeyboard(keyboard);
+            sendMessage.setReplyMarkup(markup);
+            
+            Message sent = execute(sendMessage);
+            
+            ModerationState state = moderationStates.get(chatId);
+            if (state != null) {
+                state.setTransitiveMessageId(sent.getMessageId());
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Error showing transitive alternatives proposal: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Находит или создает бренд по названию.
+     * 
+     * @param name Название бренда
+     * @return Объект Brand
+     */
+    private Brand findOrCreateBrand(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            return brandRepository.findById(1L)
+                    .orElseGet(() -> brandRepository.save(new Brand(null)));
+        }
+        
+        String trimmedName = name.trim();
+        return brandRepository.findByName(trimmedName)
+                .orElseGet(() -> brandRepository.save(new Brand(trimmedName)));
+    }
+    
+    /**
+     * Находит или создает модель ножа по названию.
+     * 
+     * @param name Название модели
+     * @return Объект KnifeModel
+     */
+    private KnifeModel findOrCreateKnifeModel(String name) {
+        if (name == null || name.trim().isEmpty()) {
+            throw new IllegalArgumentException("Имя модели не может быть пустым");
+        }
+        
+        String trimmedName = name.trim();
+        return knifeModelRepository.findByName(trimmedName)
+                .orElseGet(() -> knifeModelRepository.save(new KnifeModel(trimmedName)));
     }
 }

@@ -22,4 +22,7 @@ public interface KnifeModelRepository extends JpaRepository<KnifeModel, Long> {
     
     @Query("SELECT m FROM KnifeModel m WHERE LOWER(m.name) LIKE LOWER(CONCAT('%', :query, '%')) ORDER BY m.name ASC")
     List<KnifeModel> searchByName(@Param("query") String query);
+    
+    @Query("SELECT DISTINCT m FROM KnifeModel m JOIN Knife k WHERE k.model = m AND k.brand.name = :brandName ORDER BY m.name ASC")
+    List<KnifeModel> findByBrand(@Param("brandName") String brandName);
 }

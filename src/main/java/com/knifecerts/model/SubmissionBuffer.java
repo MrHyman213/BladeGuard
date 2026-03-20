@@ -1,20 +1,12 @@
 package com.knifecerts.model;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
 
-import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
-import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
-import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 
 @Entity
@@ -46,13 +38,8 @@ public class SubmissionBuffer {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "status", nullable = false)
-    private SubmissionStatus status = SubmissionStatus.PENDING;
-
-    @ElementCollection(fetch = FetchType.LAZY)
-    @CollectionTable(name = "buffer_alternatives", joinColumns = @JoinColumn(name = "submission_id"))
-    private List<BufferAlternative> alternatives = new ArrayList<>();
+    @Column(name = "alternatives", columnDefinition = "TEXT")
+    private String alternatives;
 
     public SubmissionBuffer() {
         this.createdAt = LocalDateTime.now();
@@ -131,28 +118,12 @@ public class SubmissionBuffer {
         this.createdAt = createdAt;
     }
 
-    public SubmissionStatus getStatus() {
-        return status;
-    }
-
-    public void setStatus(SubmissionStatus status) {
-        this.status = status;
-    }
-
-    public List<BufferAlternative> getAlternatives() {
+    public String getAlternatives() {
         return alternatives;
     }
 
-    public void setAlternatives(List<BufferAlternative> alternatives) {
+    public void setAlternatives(String alternatives) {
         this.alternatives = alternatives;
-    }
-
-    public void addAlternative(BufferAlternative alternative) {
-        this.alternatives.add(alternative);
-    }
-
-    public void removeAlternative(BufferAlternative alternative) {
-        this.alternatives.remove(alternative);
     }
 
     public String getDisplayName() {

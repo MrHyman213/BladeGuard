@@ -54,5 +54,47 @@ public enum ConversationStep {
     /**
      * Waiting for search query input
      */
-    WAITING_FOR_SEARCH_QUERY
+    WAITING_FOR_SEARCH_QUERY,
+    
+    /**
+     * AdminBot — ожидание нового фото для замены существующего
+     * Требование: 11, 15
+     */
+    ADMIN_WAITING_FOR_REPLACEMENT_PHOTO,
+    
+    /**
+     * AdminBot — ожидание фото для установки на модель без фото
+     * Требование: 11, 15
+     */
+    ADMIN_WAITING_FOR_SET_PHOTO,
+    
+    /**
+     * AdminBot — ожидание фото для прямого добавления
+     * Требование: 11, 15
+     */
+    ADMIN_WAITING_FOR_UPLOAD_PHOTO,
+    
+    /**
+     * AdminBot — форма прямого добавления заявки
+     * Требование: 11, 15
+     */
+    ADMIN_UPLOAD_FORM,
+    
+    /**
+     * Ожидание подтверждения альтернатив
+     * Требование: 11, 15
+     */
+    WAITING_FOR_ALT_CONFIRMATION,
+    
+    /**
+     * Ожидание ответа на транзитивные альтернативы
+     * Требование: 11, 15
+     */
+    WAITING_FOR_TRANSITIVE_CONFIRMATION,
+    
+    /**
+     * Ожидание подтверждения замены фото при обнаружении дубликата
+     * Требование: 10.1–10.4
+     */
+    WAITING_FOR_DUPLICATE_CONFIRMATION
 }

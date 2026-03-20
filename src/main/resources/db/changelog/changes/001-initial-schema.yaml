@@ -1,10 +1,11 @@
 databaseChangeLog:
   - changeSet:
-      id: 004-create-current-schema
+      id: 001-initial-schema
       author: system
-      comment: "Create actual database schema based on current active models"
+      comment: "Initial schema — clean state based on target architecture"
       changes:
-        # Создание таблицы брендов
+
+        # ── brands ──────────────────────────────────────────────────────────
         - createTable:
             tableName: brands
             columns:
@@ -22,7 +23,7 @@ databaseChangeLog:
                     nullable: false
                     unique: true
 
-        # Создание таблицы моделей ножей
+        # ── knife_models ─────────────────────────────────────────────────────
         - createTable:
             tableName: knife_models
             columns:
@@ -40,7 +41,7 @@ databaseChangeLog:
                     nullable: false
                     unique: true
 
-        # Создание таблицы ножей (сертификатов)
+        # ── knives ───────────────────────────────────────────────────────────
         - createTable:
             tableName: knives
             columns:
@@ -68,7 +69,7 @@ databaseChangeLog:
                   name: photo_path
                   type: VARCHAR(512)
 
-        # Создание таблицы альтернатив ножей (many-to-many)
+        # ── alternatives ─────────────────────────────────────────────────────
         - createTable:
             tableName: alternatives
             columns:
@@ -83,7 +84,13 @@ databaseChangeLog:
                   constraints:
                     nullable: false
 
-        # Создание таблицы заявок (буфер) - только для ожидающих рассмотрения
+        - addPrimaryKey:
+            tableName: alternatives
+            columnNames: knife_id, alternative_knife_id
+            constraintName: pk_alternatives
+
+        # ── submissions_buffer ───────────────────────────────────────────────
+        # Нет колонки status. Альтернативы хранятся строкой в колонке alternatives.
         - createTable:
             tableName: submissions_buffer
             columns:
@@ -125,26 +132,27 @@ databaseChangeLog:
                   type: TIMESTAMP
                   constraints:
                     nullable: false
+              - column:
+                  name: alternatives
+                  type: TEXT
 
-        # Создание таблицы альтернативных моделей в буфере (embedded)
+        # ── user_main_menu ───────────────────────────────────────────────────
         - createTable:
-            tableName: buffer_alternatives
+            tableName: user_main_menu
             columns:
               - column:
-                  name: submission_id
+                  name: chat_id
                   type: BIGINT
                   constraints:
+                    primaryKey: true
                     nullable: false
               - column:
-                  name: alt_model_name
-                  type: VARCHAR(255)
+                  name: message_id
+                  type: INTEGER
                   constraints:
                     nullable: false
-              - column:
-                  name: alt_brand_name
-                  type: VARCHAR(255)
 
-        # Добавление внешних ключей
+        # ── Foreign keys ─────────────────────────────────────────────────────
         - addForeignKeyConstraint:
             baseTableName: knives
             baseColumnNames: model_id
@@ -177,21 +185,7 @@ databaseChangeLog:
             referencedColumnNames: id
             onDelete: CASCADE
 
-        - addForeignKeyConstraint:
-            baseTableName: buffer_alternatives
-            baseColumnNames: submission_id
-            constraintName: fk_buffer_alternatives_submission
-            referencedTableName: submissions_buffer
-            referencedColumnNames: id
-            onDelete: CASCADE
-
-        # Добавление первичного ключа для таблицы альтернатив
-        - addPrimaryKey:
-            tableName: alternatives
-            columnNames: knife_id, alternative_knife_id
-            constraintName: pk_alternatives
-
-        # Создание индексов для производительности
+        # ── Indexes ──────────────────────────────────────────────────────────
         - createIndex:
             tableName: submissions_buffer
             indexName: idx_submissions_user_id
@@ -215,9 +209,34 @@ databaseChangeLog:
               - column:
                   name: brand_id
 
-        - createIndex:
-            tableName: buffer_alternatives
-            indexName: idx_buffer_alternatives_submission
-            columns:
-              - column:
-                  name: submission_id
+  # ── DB trigger: auto-delete orphan knife_models ──────────────────────────
+  - changeSet:
+      id: 001-auto-delete-trigger
+      author: system
+      comment: "Trigger to auto-delete knife_models with no photo and no alternatives"
+      dbms: postgresql
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE OR REPLACE FUNCTION cleanup_orphan_knife_models()
+              RETURNS TRIGGER AS $$
+              BEGIN
+                DELETE FROM knife_models km
+                WHERE km.id IN (OLD.knife_id, OLD.alternative_knife_id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM knives k
+                    WHERE k.model_id = km.id AND k.photo_path IS NOT NULL
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM alternatives a
+                    WHERE a.knife_id IN (SELECT id FROM knives WHERE model_id = km.id)
+                       OR a.alternative_knife_id IN (SELECT id FROM knives WHERE model_id = km.id)
+                  );
+                RETURN OLD;
+              END;
+              $$ LANGUAGE plpgsql;
+              
+              CREATE TRIGGER trg_cleanup_orphan_models
+              AFTER DELETE ON alternatives
+              FOR EACH ROW EXECUTE FUNCTION cleanup_orphan_knife_models();

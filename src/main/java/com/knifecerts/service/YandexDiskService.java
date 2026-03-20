@@ -74,6 +74,34 @@ public class YandexDiskService {
         return sb.toString();
     }
 
+    /**
+     * Загружает фото в папку certificates с указанным именем файла.
+     *
+     * @param photoStream поток с данными фото
+     * @param fileName имя файла
+     * @return путь к загруженному файлу на Yandex.Disk (app:/certificates/fileName)
+     * @throws IOException если загрузка не удалась
+     */
+    public String uploadToCertificates(InputStream photoStream, String fileName) throws IOException {
+        String path = "app:/certificates/" + fileName;
+        File tempFile = File.createTempFile("telegram_photo_", ".jpg");
+        try {
+            try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                while ((bytesRead = photoStream.read(buffer)) != -1) {
+                    fos.write(buffer, 0, bytesRead);
+                }
+            }
+            String uploadUrl = getUploadUrl(path);
+            uploadFile(uploadUrl, tempFile);
+            logger.info("Файл загружен в certificates: " + path);
+            return path;
+        } finally {
+            Files.deleteIfExists(tempFile.toPath());
+        }
+    }
+
     public String uploadPhoto(InputStream photoStream, String fileName) throws IOException {
         // Проверяем и создаем папку если её нет
         ensureFolderExists();

@@ -1,6 +1,9 @@
 package com.knifecerts.model;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Класс для отслеживания состояния диалога пользователя в процессе подачи заявки.
@@ -101,6 +104,52 @@ public class ConversationState {
      * Текущий выбранный бренд (для навигации).
      */
     private String currentBrand;
+    
+    /**
+     * Навигационный стек: уровень → messageId.
+     * Требование: 13.1, 13.2
+     */
+    private Map<Integer, Integer> navStack = new HashMap<>();
+    
+    /**
+     * ID сообщения-подтверждения (диалог, не входит в стек).
+     * Требование: 13.1, 14
+     */
+    private Integer confirmationMessageId;
+    
+    /**
+     * ID сообщения-подсказки (справка, не входит в стек).
+     * Требование: 13.1, 14
+     */
+    private Integer hintMessageId;
+    
+    /**
+     * Флаг: есть ли несохранённые изменения в форме (для AdminBot).
+     * Требование: 13.2
+     */
+    private boolean hasUnsavedChanges;
+    
+    /**
+     * ID текущей открытой заявки (для AdminBot).
+     * Требование: 13.2
+     */
+    private Long currentSubmissionId;
+    
+    /**
+     * Список сообщений пользователя для удаления.
+     * Требование: 14
+     */
+    private List<Integer> pendingDeleteMessageIds = new ArrayList<>();
+    
+    /**
+     * Поисковый запрос (для сохранения при пагинации).
+     */
+    private String searchQuery;
+    
+    /**
+     * Результаты поиска (список названий).
+     */
+    private List<String> searchResults;
     
     /**
      * Конструктор по умолчанию.
@@ -241,6 +290,54 @@ public class ConversationState {
         this.currentBrand = currentBrand;
     }
     
+    public Map<Integer, Integer> getNavStack() {
+        return navStack;
+    }
+    
+    public void setNavStack(Map<Integer, Integer> navStack) {
+        this.navStack = navStack;
+    }
+    
+    public Integer getConfirmationMessageId() {
+        return confirmationMessageId;
+    }
+    
+    public void setConfirmationMessageId(Integer confirmationMessageId) {
+        this.confirmationMessageId = confirmationMessageId;
+    }
+    
+    public Integer getHintMessageId() {
+        return hintMessageId;
+    }
+    
+    public void setHintMessageId(Integer hintMessageId) {
+        this.hintMessageId = hintMessageId;
+    }
+    
+    public boolean isHasUnsavedChanges() {
+        return hasUnsavedChanges;
+    }
+    
+    public void setHasUnsavedChanges(boolean hasUnsavedChanges) {
+        this.hasUnsavedChanges = hasUnsavedChanges;
+    }
+    
+    public Long getCurrentSubmissionId() {
+        return currentSubmissionId;
+    }
+    
+    public void setCurrentSubmissionId(Long currentSubmissionId) {
+        this.currentSubmissionId = currentSubmissionId;
+    }
+    
+    public List<Integer> getPendingDeleteMessageIds() {
+        return pendingDeleteMessageIds;
+    }
+    
+    public void setPendingDeleteMessageIds(List<Integer> pendingDeleteMessageIds) {
+        this.pendingDeleteMessageIds = pendingDeleteMessageIds;
+    }
+    
     public Integer getSuccessMessageId() {
         return successMessageId;
     }
@@ -275,5 +372,21 @@ public class ConversationState {
         this.alternativeModels = null;
         this.formMessageId = null;
         this.promptMessageId = null;
+    }
+    
+    public String getSearchQuery() {
+        return searchQuery;
+    }
+    
+    public void setSearchQuery(String searchQuery) {
+        this.searchQuery = searchQuery;
+    }
+    
+    public List<String> getSearchResults() {
+        return searchResults;
+    }
+    
+    public void setSearchResults(List<String> searchResults) {
+        this.searchResults = searchResults;
     }
 }

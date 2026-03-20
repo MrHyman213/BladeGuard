@@ -8,6 +8,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -29,9 +30,13 @@ import com.knifecerts.model.Brand;
 import com.knifecerts.model.ConversationState;
 import com.knifecerts.model.ConversationStep;
 import com.knifecerts.model.Knife;
+import com.knifecerts.model.KnifeModel;
 import com.knifecerts.model.SubmissionBuffer;
+import com.knifecerts.repository.BrandRepository;
+import com.knifecerts.repository.KnifeModelRepository;
 import com.knifecerts.service.ConversationStateManager;
 import com.knifecerts.service.KnifeService;
+import com.knifecerts.service.NavigationStackService;
 import com.knifecerts.service.SubmissionBufferService;
 import com.knifecerts.service.YandexDiskService;
 
@@ -55,11 +60,20 @@ public class KnifeBot extends TelegramLongPollingBot {
     @Autowired
     private KnifeService knifeService;
     
+    @Autowired
+    private BrandRepository brandRepository;
+    
+    @Autowired
+    private KnifeModelRepository knifeModelRepository;
+    
     // Константа для разделителя альтернативных моделей
     private static final String ALTERNATIVE_SEPARATOR = "/";
 
     @Autowired
     private ConversationStateManager conversationStateManager;
+    
+    @Autowired
+    private NavigationStackService navigationStackService;
     
     // Кэш для хранения последних разметок сообщений
     private final Map<Integer, InlineKeyboardMarkup> lastMarkupCache = new ConcurrentHashMap<>();
@@ -108,6 +122,9 @@ public class KnifeBot extends TelegramLongPollingBot {
         try {
             deleteMessage(chatId, userMessageId);
             
+            // Очищаем весь стек навигации
+            navigationStackService.clearAll(userId);
+            
             ConversationState state = conversationStateManager.getState(userId);
             if (state != null && state.getMainMenuMessageId() != null) {
                 deleteMessage(chatId, state.getMainMenuMessageId());
@@ -118,6 +135,10 @@ public class KnifeBot extends TelegramLongPollingBot {
             state = new ConversationState(userId, ConversationStep.WAITING_FOR_PHOTO);
             state.setMainMenuMessageId(mainMenu.getMessageId());
             state.setCurrentPage(0);
+            
+            // Устанавливаем главное меню на уровень 0 стека
+            navigationStackService.setLevel(userId, 0, mainMenu.getMessageId());
+            
             conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {
@@ -217,6 +238,16 @@ public class KnifeBot extends TelegramLongPollingBot {
         Long chatId = callbackQuery.getMessage().getChatId();
         Long userId = callbackQuery.getFrom().getId();
         
+        // Answer callback immediately to avoid timeout
+        try {
+            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
+                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
+            answer.setCallbackQueryId(callbackQuery.getId());
+            execute(answer);
+        } catch (TelegramApiException e) {
+            logger.warning("Failed to answer callback query immediately: " + e.getMessage());
+        }
+        
         try {
             if (data.startsWith("main_page_")) {
                 int page = Integer.parseInt(data.substring(10));
@@ -239,10 +270,10 @@ public class KnifeBot extends TelegramLongPollingBot {
                 Long submissionId = Long.parseLong(data.substring(13));
                 showAlternativesList(userId, chatId, submissionId, 0);
             } else if (data.startsWith("alt_page_")) {
-                String[] parts = data.substring(9).split("_sub_");
+                String[] parts = data.substring(9).split("_knife_");
                 int page = Integer.parseInt(parts[0]);
-                Long submissionId = Long.parseLong(parts[1]);
-                showAlternativesList(userId, chatId, submissionId, page);
+                Long knifeId = Long.parseLong(parts[1]);
+                showAlternativesList(userId, chatId, knifeId, page);
             } else if (data.equals("back_to_brands")) {
                 backToBrands(userId, chatId);
             } else if (data.equals("back_to_knives")) {
@@ -250,8 +281,15 @@ public class KnifeBot extends TelegramLongPollingBot {
             } else if (data.equals("search_brands")) {
                 handleSearchBrands(userId, chatId);
             } else if (data.startsWith("search_knives_")) {
-                Long brandId = Long.parseLong(data.substring(14));
-                handleSearchKnives(userId, chatId, brandId);
+                String brandName = data.substring(14);
+                handleSearchKnives(userId, chatId, brandName);
+            } else if (data.startsWith("search_page_")) {
+                String[] parts = data.substring(12).split("_");
+                int page = Integer.parseInt(parts[0]);
+                String type = parts[1];
+                handleSearchPageChange(userId, chatId, page, type);
+            } else if (data.equals("search_current_page")) {
+                // Ignore
             } else if (data.equals("upload_certificate")) {
                 handleUploadCertificate(userId, chatId);
             } else if (data.equals("form_edit_brand")) {
@@ -266,7 +304,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 int index = Integer.parseInt(data.substring(16));
                 handleFormRemoveAlternative(userId, chatId, index);
             } else if (data.equals("form_submit")) {
-                handleFormSubmit(userId, chatId);
+                handleFormSubmit(userId, chatId, callbackQuery.getId());
             } else if (data.equals("form_close")) {
                 handleFormClose(userId, chatId);
             } else if (data.equals("form_close_yes")) {
@@ -277,22 +315,12 @@ public class KnifeBot extends TelegramLongPollingBot {
                 handleFormCancelInput(userId, chatId);
             }
             
-            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
-                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
-            answer.setCallbackQueryId(callbackQuery.getId());
-            execute(answer);
-            
         } catch (Exception e) {
             logger.severe("Error handling callback: " + e.getMessage());
             try {
-                org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
-                    new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
-                answer.setCallbackQueryId(callbackQuery.getId());
-                answer.setText("❌ Ошибка");
-                answer.setShowAlert(true);
-                execute(answer);
-            } catch (TelegramApiException ex) {
-                logger.severe("Failed to answer callback: " + ex.getMessage());
+                sendMessage(chatId, "❌ Произошла ошибка при обработке запроса");
+            } catch (Exception ex) {
+                logger.severe("Failed to send error message: " + ex.getMessage());
             }
         }
     }
@@ -421,12 +449,21 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            deleteAllExceptMainMenu(userId, chatId);
+            // Удаляем все сообщения уровня 1 и выше (обрезаем стек до уровня 0)
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(userId, 1);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
+            }
+            navigationStackService.clearFrom(userId, 1);
             
             Message listMessage = sendKnifeList(chatId, brandName, 0);
             state.setCurrentListMessageId(listMessage.getMessageId());
             state.setCurrentBrand(brandName);
             state.setCurrentPage(0);
+            
+            // Устанавливаем список моделей на уровень 1 стека
+            navigationStackService.setLevel(userId, 1, listMessage.getMessageId());
+            
             conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {
@@ -621,9 +658,12 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            if (state.getCurrentCertificateMessageId() != null) {
-                deleteMessage(chatId, state.getCurrentCertificateMessageId());
+            // Удаляем все сообщения уровня 2 и выше (обрезаем стек до уровня 1)
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(userId, 2);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
             }
+            navigationStackService.clearFrom(userId, 2);
             
             Optional<Knife> knifeOpt = knifeService.getKnifeById(knifeId);
             if (knifeOpt.isEmpty()) {
@@ -713,34 +753,62 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             Message certMessage = execute(sendPhoto);
             state.setCurrentCertificateMessageId(certMessage.getMessageId());
+            
+            // Устанавливаем сертификат на уровень 2 стека
+            navigationStackService.setLevel(userId, 2, certMessage.getMessageId());
+            
             conversationStateManager.updateState(userId, state);
         }
     }
 
     private void showKnifeAlternatives(Long userId, Long chatId, Knife knife) throws Exception {
         ConversationState state = conversationStateManager.getState(userId);
+        // Получаем только альтернативы с фото (photo_path IS NOT NULL) — Требование 4.5
         List<Knife> alternatives = knifeService.getAlternatives(knife.getId());
         
         StringBuilder text = new StringBuilder();
         text.append("🔪 ").append(knife.getDisplayName()).append("\n\n");
-        text.append("❌ Извините, но на данный момент у нас нет сертификата данной модели.\n\n");
+        text.append("❌ Сертификат на данную модель отсутствует.\n");
         
         if (!alternatives.isEmpty()) {
-            text.append("Мы могли бы предложить альтернативные варианты:\n");
+            text.append("\nАльтернативные варианты с сертификатом:\n");
+            int maxShow = Math.min(2, alternatives.size());
+            for (int i = 0; i < maxShow; i++) {
+                Knife alt = alternatives.get(i);
+                text.append("• ").append(alt.getDisplayName()).append("\n");
+            }
+            if (alternatives.size() > 2) {
+                text.append("...и ещё ").append(alternatives.size() - 2).append(" вариант(ов)");
+            }
         }
         
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         
-        for (Knife alt : alternatives) {
-            if (alt.getPhotoPath() != null) { // Только с сертификатами
-                List<InlineKeyboardButton> altRow = new ArrayList<>();
-                altRow.add(InlineKeyboardButton.builder()
-                    .text(alt.getDisplayName())
-                    .callbackData("knife_" + alt.getId())
-                    .build());
-                keyboard.add(altRow);
+        // Показываем до 2 альтернатив — Требование 4.2
+        int maxShow = Math.min(2, alternatives.size());
+        for (int i = 0; i < maxShow; i++) {
+            Knife alt = alternatives.get(i);
+            String altName = alt.getDisplayName();
+            if (altName.length() > 40) {
+                altName = altName.substring(0, 37) + "...";
             }
+            List<InlineKeyboardButton> altRow = new ArrayList<>();
+            altRow.add(InlineKeyboardButton.builder()
+                .text(altName)
+                .callbackData("knife_" + alt.getId())
+                .build());
+            keyboard.add(altRow);
+        }
+        
+        // Кнопка [Больше...] если альтернатив с фото > 2 — Требование 4.3
+        if (alternatives.size() > 2) {
+            List<InlineKeyboardButton> moreRow = new ArrayList<>();
+            moreRow.add(InlineKeyboardButton.builder()
+                .text("Больше... (" + alternatives.size() + ")")
+                .callbackData("alternatives_" + knife.getId())
+                .build());
+            keyboard.add(moreRow);
         }
         
         List<InlineKeyboardButton> backRow = new ArrayList<>();
@@ -759,25 +827,32 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         Message certMessage = execute(message);
         state.setCurrentCertificateMessageId(certMessage.getMessageId());
+        
+        // Устанавливаем сертификат на уровень 2 стека
+        navigationStackService.setLevel(userId, 2, certMessage.getMessageId());
+        
         conversationStateManager.updateState(userId, state);
     }
 
 
-    private void showAlternativesList(Long userId, Long chatId, Long submissionId, int page) {
+    private void showAlternativesList(Long userId, Long chatId, Long knifeId, int page) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null) {
                 return;
             }
             
-            if (state.getCurrentCertificateMessageId() != null) {
-                deleteMessage(chatId, state.getCurrentCertificateMessageId());
-                state.setCurrentCertificateMessageId(null);
+            // Удаляем все сообщения уровня 3 (если есть)
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(userId, 3);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
             }
+            navigationStackService.clearFrom(userId, 3);
             
-            List<Knife> alternatives = knifeService.getAllAlternatives(submissionId);
+            // Получаем только альтернативы с фото (photo_path IS NOT NULL)
+            List<Knife> alternatives = knifeService.getAlternatives(knifeId);
             
-            int itemsPerPage = 30;
+            int itemsPerPage = 10;
             int totalPages = (int) Math.ceil((double) alternatives.size() / itemsPerPage);
             if (totalPages == 0) totalPages = 1;
             
@@ -794,27 +869,19 @@ public class KnifeBot extends TelegramLongPollingBot {
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
-            List<InlineKeyboardButton> currentRow = new ArrayList<>();
-            for (int i = 0; i < pageAlts.size(); i++) {
-                Knife alt = pageAlts.get(i);
+            // Отображаем альтернативы по одной в строке
+            for (Knife alt : pageAlts) {
                 String displayName = alt.getDisplayName();
-                if (displayName.length() > 15) {
-                    displayName = displayName.substring(0, 12) + "...";
+                if (displayName.length() > 40) {
+                    displayName = displayName.substring(0, 37) + "...";
                 }
                 
-                currentRow.add(InlineKeyboardButton.builder()
+                List<InlineKeyboardButton> altRow = new ArrayList<>();
+                altRow.add(InlineKeyboardButton.builder()
                     .text(displayName)
                     .callbackData("knife_" + alt.getId())
                     .build());
-                
-                if (currentRow.size() == 3) {
-                    keyboard.add(currentRow);
-                    currentRow = new ArrayList<>();
-                }
-            }
-            
-            if (!currentRow.isEmpty()) {
-                keyboard.add(currentRow);
+                keyboard.add(altRow);
             }
             
             if (totalPages > 1) {
@@ -824,7 +891,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text("⬅️")
-                    .callbackData("alt_page_" + prevPage + "_sub_" + submissionId)
+                    .callbackData("alt_page_" + prevPage + "_knife_" + knifeId)
                     .build());
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text(String.format("%d/%d", page + 1, totalPages))
@@ -832,7 +899,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                     .build());
                 paginationRow.add(InlineKeyboardButton.builder()
                     .text("➡️")
-                    .callbackData("alt_page_" + nextPage + "_sub_" + submissionId)
+                    .callbackData("alt_page_" + nextPage + "_knife_" + knifeId)
                     .build());
                 keyboard.add(paginationRow);
             }
@@ -840,7 +907,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             List<InlineKeyboardButton> backRow = new ArrayList<>();
             backRow.add(InlineKeyboardButton.builder()
                 .text("🔙 Назад")
-                .callbackData("knife_" + submissionId)
+                .callbackData("knife_" + knifeId)
                 .build());
             keyboard.add(backRow);
             
@@ -849,6 +916,10 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             Message altMessage = execute(message);
             state.setCurrentCertificateMessageId(altMessage.getMessageId());
+            
+            // Устанавливаем список альтернатив на уровень 3 стека
+            navigationStackService.setLevel(userId, 3, altMessage.getMessageId());
+            
             conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {
@@ -863,7 +934,12 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            deleteAllExceptMainMenu(userId, chatId);
+            // Удаляем все сообщения уровня 1 и выше (обрезаем стек до уровня 0)
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(userId, 1);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
+            }
+            navigationStackService.clearFrom(userId, 1);
             
             if (state.getMainMenuMessageId() != null) {
                 updateMainMenu(userId, chatId, state.getCurrentPage());
@@ -881,11 +957,15 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            if (state.getCurrentCertificateMessageId() != null) {
-                deleteMessage(chatId, state.getCurrentCertificateMessageId());
-                state.setCurrentCertificateMessageId(null);
-                conversationStateManager.updateState(userId, state);
+            // Удаляем все сообщения уровня 2 и выше (обрезаем стек до уровня 1)
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(userId, 2);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
             }
+            navigationStackService.clearFrom(userId, 2);
+            
+            state.setCurrentCertificateMessageId(null);
+            conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {
             logger.severe("Error going back to knife list: " + e.getMessage());
@@ -941,12 +1021,13 @@ public class KnifeBot extends TelegramLongPollingBot {
         sendMessage(chatId, "🔍 Введите название бренда для поиска:");
     }
 
-    private void handleSearchKnives(Long userId, Long chatId, Long brandId) {
+    private void handleSearchKnives(Long userId, Long chatId, String brandName) {
         ConversationState state = conversationStateManager.getState(userId);
         if (state == null) {
             return;
         }
         state.setCurrentStep(ConversationStep.WAITING_FOR_SEARCH_QUERY);
+        state.setCurrentBrand(brandName);
         conversationStateManager.updateState(userId, state);
         sendMessage(chatId, "🔍 Введите название модели для поиска:");
     }
@@ -1188,13 +1269,141 @@ public class KnifeBot extends TelegramLongPollingBot {
         
         deleteMessage(chatId, update.getMessage().getMessageId());
         
-        // TODO: Реализовать поиск брендов в новой схеме
-        List<Brand> brands = List.of(); // brandService.searchBrands(query);
-        
-        state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
-        conversationStateManager.updateState(userId, state);
-        
-        sendMessage(chatId, "Найдено брендов: " + brands.size());
+        // Determine if searching brands or models based on current context
+        if (state.getCurrentBrand() == null) {
+            // Searching brands
+            List<Brand> brands = brandRepository.searchByName(query);
+            state.setSearchQuery(query);
+            state.setSearchResults(brands.stream().map(b -> b.getName()).collect(Collectors.toList()));
+            state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
+            conversationStateManager.updateState(userId, state);
+            
+            if (brands.isEmpty()) {
+                sendMessage(chatId, "❌ Брендов не найдено");
+            } else {
+                showSearchResults(userId, chatId, brands.stream().map(b -> (Object)b).collect(Collectors.toList()), "brand", 0);
+            }
+        } else {
+            // Searching models within a brand
+            List<KnifeModel> models = knifeModelRepository.searchByName(query);
+            state.setSearchQuery(query);
+            state.setSearchResults(models.stream().map(m -> m.getName()).collect(Collectors.toList()));
+            state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
+            conversationStateManager.updateState(userId, state);
+            
+            if (models.isEmpty()) {
+                sendMessage(chatId, "❌ Моделей не найдено");
+            } else {
+                showSearchResults(userId, chatId, models.stream().map(m -> (Object)m).collect(Collectors.toList()), "model", 0);
+            }
+        }
+    }
+    
+    private void showSearchResults(Long userId, Long chatId, List<Object> results, String type, int page) {
+        try {
+            int itemsPerPage = 20;
+            int totalPages = (int) Math.ceil((double) results.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            page = ((page % totalPages) + totalPages) % totalPages;
+            
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, results.size());
+            List<Object> pageResults = results.subList(startIndex, endIndex);
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🔍 Результаты поиска (" + results.size() + " найдено)");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            for (Object result : pageResults) {
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                String name;
+                String callbackData;
+                
+                if (type.equals("brand")) {
+                    Brand brand = (Brand) result;
+                    name = brand.getName();
+                    callbackData = "brand_" + brand.getName();
+                } else {
+                    KnifeModel model = (KnifeModel) result;
+                    name = model.getName();
+                    callbackData = "knife_" + model.getId();
+                }
+                
+                if (name.length() > 40) {
+                    name = name.substring(0, 37) + "...";
+                }
+                
+                row.add(InlineKeyboardButton.builder()
+                    .text(name)
+                    .callbackData(callbackData)
+                    .build());
+                keyboard.add(row);
+            }
+            
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
+                int nextPage = (page + 1) % totalPages;
+                
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData("search_page_" + prevPage + "_" + type)
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text(String.format("%d/%d", page + 1, totalPages))
+                    .callbackData("search_current_page")
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData("search_page_" + nextPage + "_" + type)
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            List<InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Назад")
+                .callbackData("back_to_brands")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            execute(message);
+            
+        } catch (Exception e) {
+            logger.severe("Error showing search results: " + e.getMessage());
+        }
+    }
+    
+    private void handleSearchPageChange(Long userId, Long chatId, int page, String type) {
+        try {
+            ConversationState state = conversationStateManager.getState(userId);
+            if (state == null || state.getSearchResults() == null) {
+                return;
+            }
+            
+            List<Object> results;
+            if (type.equals("brand")) {
+                results = state.getSearchResults().stream()
+                    .map(name -> (Object) new Brand(name))
+                    .collect(Collectors.toList());
+            } else {
+                results = state.getSearchResults().stream()
+                    .map(name -> (Object) new KnifeModel(name))
+                    .collect(Collectors.toList());
+            }
+            
+            showSearchResults(userId, chatId, results, type, page);
+            
+        } catch (Exception e) {
+            logger.severe("Error handling search page change: " + e.getMessage());
+        }
     }
 
     private void handleFormInput(Update update) {
@@ -1367,7 +1576,17 @@ public class KnifeBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleFormSubmit(Long userId, Long chatId) {
+    private void handleFormSubmit(Long userId, Long chatId, String callbackQueryId) {
+        // Answer callback immediately to avoid timeout
+        try {
+            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
+                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
+            answer.setCallbackQueryId(callbackQueryId);
+            execute(answer);
+        } catch (TelegramApiException e) {
+            logger.warning("Failed to answer callback query immediately: " + e.getMessage());
+        }
+        
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null || state.getPhotoFileId() == null) {
@@ -1421,8 +1640,8 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             deleteAllExceptMainMenu(userId, chatId);
             
-            Message thankYou = sendMessage(chatId, "✅ Спасибо! Ваша заявка отправлена на модерацию.");
-            state.setSuccessMessageId(thankYou.getMessageId());
+            // Send success notification via regular message
+            sendMessage(chatId, "✅ Заявка отправлена на модерацию");
             
             state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
             state.clearFormData();

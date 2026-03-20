@@ -1,16 +1,25 @@
 package com.knifecerts;
 
-import java.lang.reflect.Method;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
+// Feature: blade-guardian-full-implementation, Property 11: Инвариант архивирования при замене фото
+
+import java.io.IOException;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.knifecerts.model.Knife;
+import com.knifecerts.repository.BrandRepository;
+import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.repository.KnifeRepository;
+import com.knifecerts.repository.SubmissionBufferRepository;
+import com.knifecerts.service.MainMenuUpdateService;
+import com.knifecerts.service.SubmissionBufferService;
+import com.knifecerts.service.YandexDiskService;
 
 import net.jqwik.api.Arbitraries;
 import net.jqwik.api.Arbitrary;
@@ -19,104 +28,76 @@ import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
 
 /**
- * Property-based тесты для YandexDiskService
- * Feature: certificate-submission-system
+ * Property-based тесты для YandexDiskService / SubmissionBufferService.
+ * Feature: blade-guardian-full-implementation
  */
 class YandexDiskServicePropertyTest {
 
     /**
-     * Feature: certificate-submission-system, Property 7: Уникальность Имен Файлов
-     * **Validates: Requirements 4.2**
-     * 
-     * Для любых двух заявок, сгенерированные имена файлов должны быть уникальными,
-     * даже если заявки создаются одновременно.
+     * Property 11: Инвариант архивирования при замене фото
+     *
+     * После замены фото:
+     * - старый путь должен быть перемещён в app:/archive/replaced/
+     * - новый путь должен быть установлен в записи ножа (app:/certificates/...)
+     *
+     * **Validates: Requirements 19.1, 19.2**
      */
     @Property(tries = 100)
-    void generatedFileNamesShouldBeUnique(@ForAll("fileNames") String originalName) throws Exception {
-        YandexDiskService service = new YandexDiskService();
-        
-        // Используем рефлексию для доступа к приватному методу
-        Method generateMethod = YandexDiskService.class.getDeclaredMethod("generateUniqueFileName", String.class);
-        generateMethod.setAccessible(true);
-        
-        Set<String> generatedNames = new HashSet<>();
-        int iterations = 10;
-        
-        for (int i = 0; i < iterations; i++) {
-            String fileName = (String) generateMethod.invoke(service, originalName);
-            
-            // Проверяем формат имени файла
-            assertThat(fileName).matches("photo_\\d{8}_\\d{6}_[a-z0-9]{6}\\.jpg");
-            
-            // Проверяем уникальность
-            assertThat(generatedNames).doesNotContain(fileName);
-            generatedNames.add(fileName);
-            
-            // Небольшая задержка для обеспечения разных временных меток
-            Thread.sleep(1);
-        }
-        
-        // Все имена должны быть уникальными
-        assertThat(generatedNames).hasSize(iterations);
+    void photoReplacementArchivesOldAndSetsNew(
+            @ForAll("oldPhotoPaths") String oldPath,
+            @ForAll("newPhotoPaths") String newPath) throws IOException {
+
+        // Arrange
+        YandexDiskService yandexDiskService = mock(YandexDiskService.class);
+        KnifeRepository knifeRepository = mock(KnifeRepository.class);
+        BrandRepository brandRepository = mock(BrandRepository.class);
+        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
+        SubmissionBufferRepository submissionBufferRepository = mock(SubmissionBufferRepository.class);
+        MainMenuUpdateService mainMenuUpdateService = mock(MainMenuUpdateService.class);
+
+        SubmissionBufferService service = new SubmissionBufferService(
+                submissionBufferRepository,
+                brandRepository,
+                knifeModelRepository,
+                knifeRepository,
+                yandexDiskService,
+                mainMenuUpdateService);
+
+        Knife knife = mock(Knife.class);
+        when(knife.getPhotoPath()).thenReturn(oldPath);
+        when(knifeRepository.findById(1L)).thenReturn(Optional.of(knife));
+        when(knifeRepository.save(knife)).thenReturn(knife);
+
+        // Act
+        service.replaceKnifePhoto(1L, newPath);
+
+        // Assert: старый путь перемещён в app:/archive/replaced/
+        ArgumentCaptor<String> destCaptor = ArgumentCaptor.forClass(String.class);
+        verify(yandexDiskService).moveFile(eq(oldPath), destCaptor.capture());
+        assertThat(destCaptor.getValue()).startsWith("app:/archive/replaced/");
+
+        // Assert: новый путь установлен в записи ножа
+        verify(knife).setPhotoPath(newPath);
+        assertThat(newPath).startsWith("app:/certificates/");
     }
-    
-    /**
-     * Тест на уникальность имен файлов при параллельной генерации
-     * Проверяет, что даже при одновременном создании заявок имена файлов уникальны
-     */
-    @Test
-    void generatedFileNamesShouldBeUniqueInConcurrentEnvironment() throws Exception {
-        YandexDiskService service = new YandexDiskService();
-        
-        Method generateMethod = YandexDiskService.class.getDeclaredMethod("generateUniqueFileName", String.class);
-        generateMethod.setAccessible(true);
-        
-        int threadCount = 10;
-        int iterationsPerThread = 10;
-        Set<String> allGeneratedNames = ConcurrentHashMap.newKeySet();
-        AtomicInteger collisionCount = new AtomicInteger(0);
-        
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-        CountDownLatch latch = new CountDownLatch(threadCount);
-        
-        for (int t = 0; t < threadCount; t++) {
-            executor.submit(() -> {
-                try {
-                    for (int i = 0; i < iterationsPerThread; i++) {
-                        String fileName = (String) generateMethod.invoke(service, "test.jpg");
-                        
-                        // Проверяем формат
-                        assertThat(fileName).matches("photo_\\d{8}_\\d{6}_[a-z0-9]{6}\\.jpg");
-                        
-                        // Пытаемся добавить в множество
-                        boolean added = allGeneratedNames.add(fileName);
-                        if (!added) {
-                            collisionCount.incrementAndGet();
-                        }
-                    }
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                } finally {
-                    latch.countDown();
-                }
-            });
-        }
-        
-        latch.await();
-        executor.shutdown();
-        
-        // Проверяем, что не было коллизий
-        assertThat(collisionCount.get()).isEqualTo(0);
-        assertThat(allGeneratedNames).hasSize(threadCount * iterationsPerThread);
-    }
-    
+
     @Provide
-    Arbitrary<String> fileNames() {
+    Arbitrary<String> oldPhotoPaths() {
         return Arbitraries.strings()
                 .alpha()
                 .numeric()
-                .withChars('.', '_', '-')
-                .ofMinLength(1)
-                .ofMaxLength(50);
+                .ofMinLength(4)
+                .ofMaxLength(20)
+                .map(s -> "app:/certificates/photo_" + s + ".jpg");
+    }
+
+    @Provide
+    Arbitrary<String> newPhotoPaths() {
+        return Arbitraries.strings()
+                .alpha()
+                .numeric()
+                .ofMinLength(4)
+                .ofMaxLength(20)
+                .map(s -> "app:/certificates/photo_" + s + ".jpg");
     }
 }

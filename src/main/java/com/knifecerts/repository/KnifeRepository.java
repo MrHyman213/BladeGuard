@@ -43,4 +43,7 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     
     @Query("SELECT k FROM Knife k WHERE k.brand = :brand ORDER BY k.model.name")
     List<Knife> findAllByBrand(@Param("brand") Brand brand);
+    
+    @Query("SELECT k FROM Knife k WHERE k.model.name = :modelName AND k.brand.name = :brandName AND k.index = :index")
+    Optional<Knife> findByModelNameBrandNameAndIndex(@Param("modelName") String modelName, @Param("brandName") String brandName, @Param("index") String index);
 }

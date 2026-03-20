@@ -1,17 +1,15 @@
 package com.knifecerts;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import com.knifecerts.model.Submission;
-import com.knifecerts.model.SubmissionStatus;
-import com.knifecerts.repository.KnifeModelRepository;
-import com.knifecerts.repository.SubmissionModelRepository;
-import com.knifecerts.repository.SubmissionRepository;
 
 import net.jqwik.api.Arbitraries;
 import net.jqwik.api.Arbitrary;
@@ -20,171 +18,381 @@ import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
 
 /**
- * Property-based тесты для SubmissionService
- * Feature: certificate-submission-system
+ * Property-based тесты для логики автоматического удаления моделей-кандидатов.
+ * Feature: blade-guardian-full-implementation
+ *
+ * Тесты симулируют логику DB-триггера trg_cleanup_orphan_models в чистом Java,
+ * без реальной базы данных.
+ *
+ * Логика автоудаления: KnifeModel является кандидатом на удаление, если:
+ *   - ни один нож этой модели не имеет photo_path != null
+ *   - ни один нож этой модели не участвует ни в одной связи в alternatives
  */
 class SubmissionServicePropertyTest {
-    
+
+    // ─── Внутренние модели для симуляции ────────────────────────────────────
+
+    static class SimKnifeModel {
+        final long id;
+        final String name;
+
+        SimKnifeModel(long id, String name) {
+            this.id = id;
+            this.name = name;
+        }
+    }
+
+    static class SimKnife {
+        final long id;
+        final long modelId;
+        final String photoPath; // null означает отсутствие фото
+
+        SimKnife(long id, long modelId, String photoPath) {
+            this.id = id;
+            this.modelId = modelId;
+            this.photoPath = photoPath;
+        }
+    }
+
+    /** Связь в таблице alternatives: (knifeId, alternativeKnifeId) */
+    static class SimLink {
+        final long knifeId;
+        final long alternativeKnifeId;
+
+        SimLink(long knifeId, long alternativeKnifeId) {
+            this.knifeId = knifeId;
+            this.alternativeKnifeId = alternativeKnifeId;
+        }
+    }
+
+    /** Состояние «базы данных» */
+    static class SimDb {
+        final Map<Long, SimKnifeModel> models = new HashMap<>();
+        final Map<Long, SimKnife> knives = new HashMap<>();
+        final List<SimLink> links = new ArrayList<>();
+
+        private final AtomicLong seq = new AtomicLong(1);
+
+        long nextId() {
+            return seq.getAndIncrement();
+        }
+
+        SimKnifeModel addModel(String name) {
+            long id = nextId();
+            SimKnifeModel m = new SimKnifeModel(id, name);
+            models.put(id, m);
+            return m;
+        }
+
+        SimKnife addKnife(long modelId, String photoPath) {
+            long id = nextId();
+            SimKnife k = new SimKnife(id, modelId, photoPath);
+            knives.put(id, k);
+            return k;
+        }
+
+        void addLink(long knifeId, long altKnifeId) {
+            links.add(new SimLink(knifeId, altKnifeId));
+        }
+
+        /** Удалить конкретную связь и запустить логику триггера. */
+        void deleteLink(SimLink link) {
+            links.remove(link);
+            // Триггер проверяет обе стороны удалённой связи
+            triggerCleanup(link.knifeId, link.alternativeKnifeId);
+        }
+
+        /**
+         * Симуляция функции cleanup_orphan_knife_models().
+         * Удаляет knife_models, у которых нет ножей с photo_path != null
+         * и нет ни одной связи в alternatives.
+         */
+        void triggerCleanup(long knifeId1, long knifeId2) {
+            Set<Long> modelIdsToCheck = new HashSet<>();
+            if (knives.containsKey(knifeId1)) {
+                modelIdsToCheck.add(knives.get(knifeId1).modelId);
+            }
+            if (knives.containsKey(knifeId2)) {
+                modelIdsToCheck.add(knives.get(knifeId2).modelId);
+            }
+
+            for (long modelId : modelIdsToCheck) {
+                if (isOrphanModel(modelId)) {
+                    // Удаляем модель и все её ножи (CASCADE)
+                    Set<Long> knifeIdsOfModel = knives.values().stream()
+                            .filter(k -> k.modelId == modelId)
+                            .map(k -> k.id)
+                            .collect(Collectors.toSet());
+                    knifeIdsOfModel.forEach(knives::remove);
+                    models.remove(modelId);
+                }
+            }
+        }
+
+        /**
+         * Проверяет, является ли модель кандидатом на удаление:
+         * нет ножей с photo_path != null И нет связей в alternatives.
+         */
+        boolean isOrphanModel(long modelId) {
+            // Проверяем наличие ножей с фото
+            boolean hasPhoto = knives.values().stream()
+                    .anyMatch(k -> k.modelId == modelId && k.photoPath != null);
+            if (hasPhoto) return false;
+
+            // Проверяем наличие связей
+            Set<Long> knifeIds = knives.values().stream()
+                    .filter(k -> k.modelId == modelId)
+                    .map(k -> k.id)
+                    .collect(Collectors.toSet());
+
+            boolean hasLinks = links.stream()
+                    .anyMatch(l -> knifeIds.contains(l.knifeId) || knifeIds.contains(l.alternativeKnifeId));
+
+            return !hasLinks;
+        }
+
+        /** Найти все модели-кандидаты на удаление (для проверки идемпотентности). */
+        List<Long> findOrphanModels() {
+            return models.keySet().stream()
+                    .filter(this::isOrphanModel)
+                    .collect(Collectors.toList());
+        }
+
+        /** Выполнить полную очистку всех кандидатов (для идемпотентности). */
+        void runFullCleanup() {
+            List<Long> orphans = findOrphanModels();
+            for (long modelId : orphans) {
+                Set<Long> knifeIdsOfModel = knives.values().stream()
+                        .filter(k -> k.modelId == modelId)
+                        .map(k -> k.id)
+                        .collect(Collectors.toSet());
+                knifeIdsOfModel.forEach(knives::remove);
+                models.remove(modelId);
+            }
+        }
+    }
+
+    // ─── Генераторы ─────────────────────────────────────────────────────────
+
     /**
-     * Feature: certificate-submission-system, Property 10: Полнота Данных Заявки
-     * **Validates: Requirements 5.3**
-     * 
-     * Для любой созданной записи заявки, все обязательные поля (user_id, username, 
-     * photo_path, status, created_at) должны быть заполнены, а опциональные поля 
-     * (model_name, description) могут быть null.
+     * Генерирует «чистое» состояние БД: несколько моделей, каждая с одним или двумя ножами.
+     * Каждая модель либо имеет фото, либо имеет хотя бы одну связь — т.е. нет pre-existing orphans.
+     * Это соответствует инварианту: триггер поддерживает чистоту, поэтому начальное состояние чистое.
+     */
+    @Provide
+    Arbitrary<SimDb> databases() {
+        // Генерируем 2-5 моделей, каждая с одним ножом
+        return Arbitraries.integers().between(2, 5).flatMap(modelCount ->
+            Arbitraries.of(true, false).list().ofSize(modelCount).flatMap(hasPhotoFlags ->
+                Arbitraries.integers().between(0, modelCount - 1).list().ofMinSize(modelCount).ofMaxSize(modelCount * 2)
+                    .map(linkPairIndices -> {
+                        SimDb db = new SimDb();
+                        List<SimKnife> oneKnifePerModel = new ArrayList<>();
+
+                        for (int i = 0; i < modelCount; i++) {
+                            SimKnifeModel model = db.addModel("Model_" + (i + 1));
+                            String photo = hasPhotoFlags.get(i) ? "app:/certificates/photo_" + model.id + ".jpg" : null;
+                            oneKnifePerModel.add(db.addKnife(model.id, photo));
+                        }
+
+                        // Добавляем связи между ножами разных моделей
+                        for (int idx = 0; idx + 1 < linkPairIndices.size(); idx += 2) {
+                            int mi = linkPairIndices.get(idx) % modelCount;
+                            int mj = linkPairIndices.get(idx + 1) % modelCount;
+                            if (mi != mj) {
+                                SimKnife k1 = oneKnifePerModel.get(mi);
+                                SimKnife k2 = oneKnifePerModel.get(mj);
+                                boolean alreadyLinked = db.links.stream()
+                                        .anyMatch(l -> (l.knifeId == k1.id && l.alternativeKnifeId == k2.id)
+                                                || (l.knifeId == k2.id && l.alternativeKnifeId == k1.id));
+                                if (!alreadyLinked) {
+                                    db.addLink(k1.id, k2.id);
+                                    db.addLink(k2.id, k1.id);
+                                }
+                            }
+                        }
+
+                        // Убеждаемся, что каждая модель без фото имеет хотя бы одну связь
+                        // (иначе это pre-existing orphan, что нарушает инвариант чистого состояния)
+                        for (int i = 0; i < modelCount; i++) {
+                            if (!hasPhotoFlags.get(i)) {
+                                SimKnife knife = oneKnifePerModel.get(i);
+                                boolean hasLink = db.links.stream()
+                                        .anyMatch(l -> l.knifeId == knife.id || l.alternativeKnifeId == knife.id);
+                                if (!hasLink) {
+                                    // Связываем с первой другой моделью
+                                    for (int j = 0; j < modelCount; j++) {
+                                        if (j != i) {
+                                            SimKnife other = oneKnifePerModel.get(j);
+                                            db.addLink(knife.id, other.id);
+                                            db.addLink(other.id, knife.id);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        return db;
+                    })
+            )
+        );
+    }
+
+    // ─── Property 7: Постусловие чистоты БД после удаления связи ────────────
+
+    /**
+     * // Feature: blade-guardian-full-implementation, Property 7: Постусловие чистоты БД после удаления связи
+     *
+     * После удаления любой связи из alternatives в БД не должно существовать
+     * записей в knife_models, у которых нет ни одного ножа с photo_path IS NOT NULL
+     * и нет ни одной связи в alternatives.
+     *
+     * **Validates: Requirements 12.5, 18.1**
      */
     @Property(tries = 100)
-    void createdSubmissionShouldHaveAllRequiredFieldsPopulated(
-            @ForAll("userIds") Long userId,
-            @ForAll("usernames") String username,
-            @ForAll("modelNames") String modelName,
-            @ForAll("descriptions") String description,
-            @ForAll("photoPaths") String photoPath) {
-        
-        // Создаем моки для каждого теста
-        SubmissionRepository submissionRepository = mock(SubmissionRepository.class);
-        YandexDiskService yandexDiskService = mock(YandexDiskService.class);
-        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
-        SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
-        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService, knifeModelRepository, submissionModelRepository);
-        
-        // Настраиваем мок для возврата заявки с ID
-        when(submissionRepository.save(any(Submission.class))).thenAnswer(invocation -> {
-            Submission submission = invocation.getArgument(0);
-            submission.setId(1L);
-            return submission;
-        });
-        
-        // Создаем заявку
-        Submission result = submissionService.createSubmission(
-            userId, username, photoPath, modelName, description, null);
-        
-        // Проверяем обязательные поля
-        assertThat(result.getUserId()).isNotNull().isEqualTo(userId);
-        assertThat(result.getUsername()).isNotNull().isEqualTo(username);
-        assertThat(result.getPhotoPath()).isNotNull().isEqualTo(photoPath);
-        assertThat(result.getStatus()).isNotNull().isEqualTo(SubmissionStatus.PENDING);
-        assertThat(result.getCreatedAt()).isNotNull();
-        
-        // Опциональные поля могут быть null или иметь значение
-        if (modelName != null) {
-            assertThat(result.getName()).isEqualTo(modelName);
+    void autoDeletePostcondition(@ForAll("databases") SimDb db) {
+        // Если нет связей — нечего удалять, постусловие тривиально выполнено
+        if (db.links.isEmpty()) {
+            assertThat(db.findOrphanModels()).isEmpty();
+            return;
         }
-        if (description != null) {
-            assertThat(result.getBrand()).isEqualTo(description);
-        }
-        
-        // Поля модерации должны быть null для новой заявки
-        assertThat(result.getModeratedAt()).isNull();
-        assertThat(result.getModeratedBy()).isNull();
+
+        // Удаляем случайную связь (первую для детерминизма в рамках одного теста)
+        SimLink linkToDelete = db.links.get(0);
+        db.deleteLink(linkToDelete);
+
+        // Постусловие: в БД не должно быть моделей-кандидатов на удаление
+        List<Long> orphans = db.findOrphanModels();
+        assertThat(orphans)
+                .as("После удаления связи в БД не должно быть моделей без фото и без связей")
+                .isEmpty();
     }
-    
+
+    // ─── Property 8: Автоудаление не затрагивает модели с фото ─────────────
+
     /**
-     * Feature: certificate-submission-system, Property 13: Фильтрация Ожидающих Заявок
-     * **Validates: Requirements 7.1**
-     * 
-     * Для любого запроса списка ожидающих заявок, система должна возвращать только 
-     * заявки со статусом PENDING, отсортированные по дате создания.
+     * // Feature: blade-guardian-full-implementation, Property 8: Автоудаление не затрагивает модели с фото
+     *
+     * После выполнения логики автоудаления ни одна модель, у которой есть хотя бы
+     * один нож с photo_path IS NOT NULL, не должна быть удалена.
+     *
+     * **Validates: Requirements 12.3, 18.2**
      */
     @Property(tries = 100)
-    void getPendingSubmissionsShouldReturnOnlyPendingSubmissionsOrderedByCreatedAt(
-            @ForAll("submissionLists") List<Submission> allSubmissions) {
-        
-        // Создаем моки для каждого теста
-        SubmissionRepository submissionRepository = mock(SubmissionRepository.class);
-        YandexDiskService yandexDiskService = mock(YandexDiskService.class);
-        KnifeModelRepository knifeModelRepository = mock(KnifeModelRepository.class);
-        SubmissionModelRepository submissionModelRepository = mock(SubmissionModelRepository.class);
-        SubmissionService submissionService = new SubmissionService(submissionRepository, yandexDiskService, knifeModelRepository, submissionModelRepository);
-        
-        // Фильтруем только PENDING заявки и сортируем по дате создания
-        List<Submission> expectedPending = allSubmissions.stream()
-                .filter(s -> s.getStatus() == SubmissionStatus.PENDING)
-                .sorted((s1, s2) -> s1.getCreatedAt().compareTo(s2.getCreatedAt()))
-                .toList();
-        
-        // Настраиваем мок
-        when(submissionRepository.findByStatusOrderByCreatedAtAsc(SubmissionStatus.PENDING))
-                .thenReturn(expectedPending);
-        
-        // Получаем ожидающие заявки
-        List<Submission> result = submissionService.getPendingSubmissions();
-        
-        // Проверяем, что все заявки имеют статус PENDING
-        assertThat(result).allMatch(s -> s.getStatus() == SubmissionStatus.PENDING);
-        
-        // Проверяем сортировку по дате создания (по возрастанию)
-        for (int i = 0; i < result.size() - 1; i++) {
-            assertThat(result.get(i).getCreatedAt())
-                    .isBeforeOrEqualTo(result.get(i + 1).getCreatedAt());
+    void autoDeletePreservesPhotoModels(@ForAll("databases") SimDb db) {
+        // Запоминаем модели с фото до очистки
+        Set<Long> modelsWithPhoto = db.knives.values().stream()
+                .filter(k -> k.photoPath != null)
+                .map(k -> k.modelId)
+                .collect(Collectors.toSet());
+
+        // Запускаем полную очистку
+        db.runFullCleanup();
+
+        // Все модели с фото должны остаться
+        for (long modelId : modelsWithPhoto) {
+            assertThat(db.models).as("Модель с фото (id=%d) не должна быть удалена", modelId)
+                    .containsKey(modelId);
         }
-        
-        // Проверяем, что результат соответствует ожидаемому
-        assertThat(result).isEqualTo(expectedPending);
     }
-    
-    @Provide
-    Arbitrary<Long> userIds() {
-        return Arbitraries.longs().greaterOrEqual(1L);
+
+    // ─── Property 9: Автоудаление не затрагивает связанные модели ───────────
+
+    /**
+     * // Feature: blade-guardian-full-implementation, Property 9: Автоудаление не затрагивает связанные модели
+     *
+     * После выполнения логики автоудаления ни одна модель, у которой есть хотя бы
+     * одна связь в alternatives, не должна быть удалена.
+     *
+     * **Validates: Requirements 12.4, 18.3**
+     */
+    @Property(tries = 100)
+    void autoDeletePreservesLinkedModels(@ForAll("databases") SimDb db) {
+        // Запоминаем модели, у которых есть связи
+        Set<Long> modelsWithLinks = new HashSet<>();
+        for (SimLink link : db.links) {
+            if (db.knives.containsKey(link.knifeId)) {
+                modelsWithLinks.add(db.knives.get(link.knifeId).modelId);
+            }
+            if (db.knives.containsKey(link.alternativeKnifeId)) {
+                modelsWithLinks.add(db.knives.get(link.alternativeKnifeId).modelId);
+            }
+        }
+
+        // Запускаем полную очистку
+        db.runFullCleanup();
+
+        // Все модели со связями должны остаться
+        for (long modelId : modelsWithLinks) {
+            assertThat(db.models).as("Модель со связями (id=%d) не должна быть удалена", modelId)
+                    .containsKey(modelId);
+        }
     }
-    
-    @Provide
-    Arbitrary<String> usernames() {
-        return Arbitraries.strings()
-                .alpha()
-                .numeric()
-                .withChars('_')
-                .ofMinLength(3)
-                .ofMaxLength(50);
+
+    // ─── Property 10: Идемпотентность автоудаления ──────────────────────────
+
+    /**
+     * // Feature: blade-guardian-full-implementation, Property 10: Идемпотентность автоудаления
+     *
+     * Повторная проверка кандидатов на удаление после уже выполненной очистки
+     * должна возвращать пустой результат.
+     *
+     * **Validates: Requirements 12.6, 18.4**
+     */
+    @Property(tries = 100)
+    void autoDeleteIdempotent(@ForAll("databases") SimDb db) {
+        // Первая очистка
+        db.runFullCleanup();
+
+        // После первой очистки кандидатов быть не должно
+        List<Long> orphansAfterFirst = db.findOrphanModels();
+        assertThat(orphansAfterFirst)
+                .as("После первой очистки кандидатов на удаление быть не должно")
+                .isEmpty();
+
+        // Вторая очистка — ничего не должно измениться
+        int modelCountBefore = db.models.size();
+        db.runFullCleanup();
+        int modelCountAfter = db.models.size();
+
+        assertThat(modelCountAfter)
+                .as("Повторная очистка не должна удалять дополнительные модели")
+                .isEqualTo(modelCountBefore);
+
+        // Снова проверяем — кандидатов нет
+        assertThat(db.findOrphanModels())
+                .as("После второй очистки кандидатов на удаление быть не должно")
+                .isEmpty();
     }
-    
-    @Provide
-    Arbitrary<String> modelNames() {
-        return Arbitraries.strings()
-                .ofMinLength(0)
-                .ofMaxLength(100)
-                .injectNull(0.3); // 30% вероятность null
-    }
-    
-    @Provide
-    Arbitrary<String> descriptions() {
-        return Arbitraries.strings()
-                .ofMinLength(0)
-                .ofMaxLength(500)
-                .injectNull(0.3); // 30% вероятность null
-    }
-    
-    @Provide
-    Arbitrary<String> photoPaths() {
-        return Arbitraries.strings()
-                .alpha()
-                .numeric()
-                .withChars('/', '.', '_', '-')
-                .ofMinLength(10)
-                .ofMaxLength(200);
-    }
-    
-    @Provide
-    Arbitrary<List<Submission>> submissionLists() {
-        return Arbitraries.of(SubmissionStatus.values())
-                .flatMap(status -> {
-                    return Arbitraries.longs().greaterOrEqual(1L)
-                            .flatMap(userId -> {
-                                return Arbitraries.strings().alpha().ofMinLength(3).ofMaxLength(20)
-                                        .flatMap(username -> {
-                                            return Arbitraries.strings().alpha().ofMinLength(10).ofMaxLength(50)
-                                                    .map(photoPath -> {
-                                                        Submission submission = new Submission(
-                                                                userId, username, null, null, photoPath);
-                                                        submission.setId(userId);
-                                                        submission.setStatus(status);
-                                                        return submission;
-                                                    });
-                                        });
-                            });
-                })
-                .list()
-                .ofMinSize(0)
-                .ofMaxSize(20);
+
+    // ─── Unit-тест: обе стороны связи имеют photo_path → ничего не удаляется
+
+    /**
+     * Граничный случай: удаление связи, когда оба ножа имеют photo_path.
+     * Ни одна модель не должна быть удалена.
+     *
+     * **Validates: Requirements 12.3, 18.2**
+     */
+    @Property(tries = 1)
+    void deleteLinkBothSidesHavePhoto() {
+        SimDb db = new SimDb();
+
+        SimKnifeModel modelA = db.addModel("ModelA");
+        SimKnifeModel modelB = db.addModel("ModelB");
+
+        SimKnife knifeA = db.addKnife(modelA.id, "app:/certificates/photo_a.jpg");
+        SimKnife knifeB = db.addKnife(modelB.id, "app:/certificates/photo_b.jpg");
+
+        db.addLink(knifeA.id, knifeB.id);
+        db.addLink(knifeB.id, knifeA.id);
+
+        // Удаляем одну из связей
+        SimLink linkToDelete = db.links.get(0);
+        db.deleteLink(linkToDelete);
+
+        // Обе модели должны остаться — у них есть photo_path
+        assertThat(db.models).containsKey(modelA.id);
+        assertThat(db.models).containsKey(modelB.id);
     }
 }
