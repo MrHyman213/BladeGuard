@@ -48,6 +48,9 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     @Query("SELECT DISTINCT k.brand FROM Knife k WHERE k.photoPath IS NOT NULL ORDER BY k.brand.name")
     List<Brand> findAllBrandsWithCertificates();
     
+    @Query("SELECT DISTINCT k.brand FROM Knife k ORDER BY k.brand.name")
+    List<Brand> findAllBrandsWithKnives();
+    
     @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand WHERE k.brand = :brand AND k.photoPath IS NOT NULL ORDER BY k.model.name")
     List<Knife> findCertificatesByBrand(@Param("brand") Brand brand);
     

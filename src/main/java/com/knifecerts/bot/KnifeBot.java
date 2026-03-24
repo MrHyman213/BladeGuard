@@ -159,7 +159,7 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
     
     private Message sendMainMenuWithPage(Long chatId, int page) throws TelegramApiException {
-        List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+        List<Brand> allBrands = knifeService.getAllBrandsWithKnives();
         
         int itemsPerPage = 30;
         int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
@@ -348,7 +348,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+            List<Brand> allBrands = knifeService.getAllBrandsWithKnives();
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
             if (totalPages == 0) totalPages = 1;
@@ -489,7 +489,7 @@ public class KnifeBot extends TelegramLongPollingBot {
 
 
     private Message sendKnifeList(Long chatId, String brandName, int page) throws TelegramApiException {
-        List<Knife> knives = knifeService.getCertificatesByBrand(brandName);
+        List<Knife> knives = knifeService.getAllKnivesByBrand(brandName);
         
         int itemsPerPage = 30;
         int totalPages = (int) Math.ceil((double) knives.size() / itemsPerPage);
@@ -512,6 +512,10 @@ public class KnifeBot extends TelegramLongPollingBot {
         for (int i = 0; i < pageKnives.size(); i++) {
             Knife knife = pageKnives.get(i);
             String displayName = knife.getModel().getName();
+            // Добавляем индикатор для моделей с сертификатом
+            if (knife.getPhotoPath() != null) {
+                displayName += " ✅";
+            }
             if (displayName.length() > 15) {
                 displayName = displayName.substring(0, 12) + "...";
             }
@@ -578,7 +582,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                 return;
             }
             
-            List<Knife> knives = knifeService.getCertificatesByBrand(brandName);
+            List<Knife> knives = knifeService.getAllKnivesByBrand(brandName);
             
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) knives.size() / itemsPerPage);
@@ -597,6 +601,10 @@ public class KnifeBot extends TelegramLongPollingBot {
             for (int i = 0; i < pageKnives.size(); i++) {
                 Knife knife = pageKnives.get(i);
                 String displayName = knife.getModel().getName();
+                // Добавляем индикатор для моделей с сертификатом
+                if (knife.getPhotoPath() != null) {
+                    displayName += " ✅";
+                }
                 if (displayName.length() > 15) {
                     displayName = displayName.substring(0, 12) + "...";
                 }

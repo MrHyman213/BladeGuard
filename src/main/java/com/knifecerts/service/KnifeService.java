@@ -29,6 +29,10 @@ public class KnifeService {
     public List<Brand> getAllBrandsWithCertificates() {
         return knifeRepository.findAllBrandsWithCertificates();
     }
+    
+    public List<Brand> getAllBrandsWithKnives() {
+        return knifeRepository.findAllBrandsWithKnives();
+    }
 
     public List<Knife> getCertificatesByBrand(String brandName) {
         Optional<Brand> brand = brandRepository.findByName(brandName);
