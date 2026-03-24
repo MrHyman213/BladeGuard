@@ -704,7 +704,7 @@ public class KnifeBot extends TelegramLongPollingBot {
 
     private void showKnifeCertificate(Long userId, Long chatId, Knife knife) throws Exception {
         ConversationState state = conversationStateManager.getState(userId);
-        List<Knife> alternatives = knifeService.getAlternatives(knife.getId());
+        List<Knife> alternatives = knifeService.getAllAlternatives(knife.getId());
         
         StringBuilder caption = new StringBuilder();
         caption.append("🔪 ").append(knife.getDisplayName()).append("\n\n");
@@ -779,19 +779,23 @@ public class KnifeBot extends TelegramLongPollingBot {
 
     private void showKnifeAlternatives(Long userId, Long chatId, Knife knife) throws Exception {
         ConversationState state = conversationStateManager.getState(userId);
-        // Получаем только альтернативы с фото (photo_path IS NOT NULL) — Требование 4.5
-        List<Knife> alternatives = knifeService.getAlternatives(knife.getId());
+        // Получаем ВСЕ альтернативы (включая без фото)
+        List<Knife> alternatives = knifeService.getAllAlternatives(knife.getId());
         
         StringBuilder text = new StringBuilder();
         text.append("🔪 ").append(knife.getDisplayName()).append("\n\n");
         text.append("❌ Сертификат на данную модель отсутствует.\n");
         
         if (!alternatives.isEmpty()) {
-            text.append("\nАльтернативные варианты с сертификатом:\n");
+            text.append("\nАльтернативные варианты:\n");
             int maxShow = Math.min(2, alternatives.size());
             for (int i = 0; i < maxShow; i++) {
                 Knife alt = alternatives.get(i);
-                text.append("• ").append(alt.getDisplayName()).append("\n");
+                text.append("• ").append(alt.getDisplayName());
+                if (alt.getPhotoPath() != null) {
+                    text.append(" ✅");
+                }
+                text.append("\n");
             }
             if (alternatives.size() > 2) {
                 text.append("...и ещё ").append(alternatives.size() - 2).append(" вариант(ов)");
@@ -801,11 +805,14 @@ public class KnifeBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         
-        // Показываем до 2 альтернатив — Требование 4.2
+        // Показываем до 2 альтернатив
         int maxShow = Math.min(2, alternatives.size());
         for (int i = 0; i < maxShow; i++) {
             Knife alt = alternatives.get(i);
             String altName = alt.getDisplayName();
+            if (alt.getPhotoPath() != null) {
+                altName += " ✅";
+            }
             if (altName.length() > 40) {
                 altName = altName.substring(0, 37) + "...";
             }
@@ -817,7 +824,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             keyboard.add(altRow);
         }
         
-        // Кнопка [Больше...] если альтернатив с фото > 2 — Требование 4.3
+        // Кнопка [Больше...] если альтернатив > 2
         if (alternatives.size() > 2) {
             List<InlineKeyboardButton> moreRow = new ArrayList<>();
             moreRow.add(InlineKeyboardButton.builder()
@@ -865,8 +872,8 @@ public class KnifeBot extends TelegramLongPollingBot {
             }
             navigationStackService.clearFrom(userId, 3);
             
-            // Получаем только альтернативы с фото (photo_path IS NOT NULL)
-            List<Knife> alternatives = knifeService.getAlternatives(knifeId);
+            // Получаем ВСЕ альтернативы (включая без фото)
+            List<Knife> alternatives = knifeService.getAllAlternatives(knifeId);
             
             int itemsPerPage = 10;
             int totalPages = (int) Math.ceil((double) alternatives.size() / itemsPerPage);
@@ -880,7 +887,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
-            message.setText("🔄 Альтернативные сертификаты\n\nВсего: " + alternatives.size());
+            message.setText("🔄 Альтернативные модели\n\nВсего: " + alternatives.size());
             
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
@@ -888,6 +895,9 @@ public class KnifeBot extends TelegramLongPollingBot {
             // Отображаем альтернативы по одной в строке
             for (Knife alt : pageAlts) {
                 String displayName = alt.getDisplayName();
+                if (alt.getPhotoPath() != null) {
+                    displayName += " ✅";
+                }
                 if (displayName.length() > 40) {
                     displayName = displayName.substring(0, 37) + "...";
                 }

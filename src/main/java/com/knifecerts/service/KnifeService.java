@@ -58,7 +58,7 @@ public class KnifeService {
     }
 
     public List<Knife> getAlternatives(Long knifeId) {
-        Optional<Knife> knife = knifeRepository.findById(knifeId);
+        Optional<Knife> knife = knifeRepository.findByIdWithAlternatives(knifeId);
         if (knife.isPresent()) {
             return knife.get().getAlternatives().stream()
                     .filter(alt -> alt.getPhotoPath() != null) // Только с сертификатами
@@ -68,7 +68,7 @@ public class KnifeService {
     }
 
     public List<Knife> getAllAlternatives(Long knifeId) {
-        Optional<Knife> knife = knifeRepository.findById(knifeId);
+        Optional<Knife> knife = knifeRepository.findByIdWithAlternatives(knifeId);
         if (knife.isPresent()) {
             return List.copyOf(knife.get().getAlternatives());
         }
@@ -84,6 +84,6 @@ public class KnifeService {
     }
 
     public Optional<Knife> getKnifeById(Long id) {
-        return knifeRepository.findById(id);
+        return knifeRepository.findByIdWithAlternatives(id);
     }
 }

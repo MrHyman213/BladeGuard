@@ -203,7 +203,7 @@ public class AdminBot extends TelegramLongPollingBot {
             // Parse alternatives from TEXT field
             AlternativesParser parser = new AlternativesParserImpl("/");
             this.alternativeModels = parser.parse(original.getAlternatives()).stream()
-                .map(alt -> alt.name() + (alt.brand() != null ? " / " + alt.brand() : ""))
+                .map(alt -> (alt.brand() != null ? alt.brand() + " / " : "") + alt.name())
                 .collect(java.util.stream.Collectors.toList());
             this.isApprovedView = false;
         }
@@ -214,7 +214,7 @@ public class AdminBot extends TelegramLongPollingBot {
             this.brand = original.getBrand().getName();
             this.indexCode = original.getIndex();
             this.alternativeModels = original.getAlternatives().stream()
-                .map(alt -> alt.getModel().getName() + " / " + alt.getBrand().getName())
+                .map(alt -> alt.getBrand().getName() + " / " + alt.getModel().getName())
                 .collect(java.util.stream.Collectors.toList());
             this.isApprovedView = isApprovedView;
         }
@@ -233,7 +233,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 String originalIndex = sub.getIndex();
                 AlternativesParser parser = new AlternativesParserImpl("/");
                 List<String> originalAlts = parser.parse(sub.getAlternatives()).stream()
-                    .map(alt -> alt.name() + (alt.brand() != null ? " / " + alt.brand() : ""))
+                    .map(alt -> (alt.brand() != null ? alt.brand() + " / " : "") + alt.name())
                     .collect(java.util.stream.Collectors.toList());
                 
                 boolean nameChanged = !java.util.Objects.equals(originalName, name);
@@ -248,7 +248,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 String originalBrand = knife.getBrand().getName();
                 String originalIndex = knife.getIndex();
                 List<String> originalAlts = knife.getAlternatives().stream()
-                    .map(alt -> alt.getModel().getName() + " / " + alt.getBrand().getName())
+                    .map(alt -> alt.getBrand().getName() + " / " + alt.getModel().getName())
                     .collect(java.util.stream.Collectors.toList());
                 
                 boolean nameChanged = !java.util.Objects.equals(originalName, name);
