@@ -24,7 +24,13 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     Optional<Knife> findByModelAndBrand(KnifeModel model, Brand brand);
 
     
-    @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand LEFT JOIN FETCH k.alternatives WHERE k.id = :id")
+    @Query("SELECT DISTINCT k FROM Knife k " +
+           "JOIN FETCH k.model " +
+           "JOIN FETCH k.brand " +
+           "LEFT JOIN FETCH k.alternatives a " +
+           "LEFT JOIN FETCH a.model " +
+           "LEFT JOIN FETCH a.brand " +
+           "WHERE k.id = :id")
     Optional<Knife> findByIdWithAlternatives(@Param("id") Long id);
     
     @Query("SELECT k FROM Knife k WHERE k.model.id = :modelId AND k.brand.id = :brandId AND k.photoPath IS NOT NULL")

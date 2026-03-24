@@ -183,11 +183,16 @@ public class SubmissionBufferService {
         // Обрабатываем альтернативы из TEXT поля
         String alternativesStr = submission.getAlternatives();
         if (alternativesStr != null && !alternativesStr.isEmpty()) {
-            // Используем разделитель с пробелами для парсинга
-            AlternativesParser parser = new AlternativesParserImpl(" / ");
+            // Используем разделитель "/" для парсинга (AlternativesParser нормализует пробелы)
+            AlternativesParser parser = new AlternativesParserImpl("/");
             List<AlternativeEntry> alternatives = parser.parse(alternativesStr);
 
             for (AlternativeEntry altEntry : alternatives) {
+                // Пропускаем альтернативы без бренда и названия
+                if (altEntry.name() == null || altEntry.name().trim().isEmpty()) {
+                    continue;
+                }
+                
                 BrandWithCreated altBrandResult = findOrCreateBrand(altEntry.brand());
                 KnifeModel altModel = findOrCreateKnifeModel(altEntry.name());
 
