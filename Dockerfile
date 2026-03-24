@@ -1,18 +1,20 @@
 FROM eclipse-temurin:21-jdk-alpine AS build
 WORKDIR /app
 
-# Копируем Maven wrapper и pom.xml для кеширования зависимостей
-COPY .mvn .mvn
-COPY mvnw pom.xml ./
+# Устанавливаем Maven
+RUN apk add --no-cache maven
+
+# Копируем pom.xml для кеширования зависимостей
+COPY pom.xml ./
 
 # Загружаем зависимости (кешируется если pom.xml не изменился)
-RUN ./mvnw dependency:go-offline -B
+RUN mvn dependency:go-offline -B
 
 # Копируем исходный код
 COPY src ./src
 
 # Собираем приложение
-RUN ./mvnw clean package -DskipTests
+RUN mvn clean package -DskipTests
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

@@ -245,16 +245,7 @@ public class KnifeBot extends TelegramLongPollingBot {
         String data = callbackQuery.getData();
         Long chatId = callbackQuery.getMessage().getChatId();
         Long userId = callbackQuery.getFrom().getId();
-        
-        // Answer callback immediately to avoid timeout
-        try {
-            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
-                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
-            answer.setCallbackQueryId(callbackQuery.getId());
-            execute(answer);
-        } catch (TelegramApiException e) {
-            logger.warning("Failed to answer callback query immediately: " + e.getMessage());
-        }
+        String toastMessage = null; // Сообщение для Toast-уведомления
         
         try {
             if (data.startsWith("main_page_")) {
@@ -308,11 +299,14 @@ public class KnifeBot extends TelegramLongPollingBot {
                 handleFormEditField(userId, chatId, "index");
             } else if (data.equals("form_add_alt")) {
                 handleFormAddAlternative(userId, chatId);
+                toastMessage = "➕ Альтернатива добавлена";
             } else if (data.startsWith("form_remove_alt_")) {
                 int index = Integer.parseInt(data.substring(16));
                 handleFormRemoveAlternative(userId, chatId, index);
+                toastMessage = "🗑️ Альтернатива удалена";
             } else if (data.equals("form_submit")) {
-                handleFormSubmit(userId, chatId, callbackQuery.getId());
+                handleFormSubmit(userId, chatId);
+                toastMessage = "✅ Заявка отправлена на модерацию";
             } else if (data.equals("form_close")) {
                 handleFormClose(userId, chatId);
             } else if (data.equals("form_close_yes")) {
@@ -330,6 +324,20 @@ public class KnifeBot extends TelegramLongPollingBot {
             } catch (Exception ex) {
                 logger.severe("Failed to send error message: " + ex.getMessage());
             }
+        }
+        
+        // Отправляем ответ на callback (обязательно в конце)
+        try {
+            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
+                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
+            answer.setCallbackQueryId(callbackQuery.getId());
+            if (toastMessage != null) {
+                answer.setText(toastMessage);
+                answer.setShowAlert(false); // Toast notification, не popup
+            }
+            execute(answer);
+        } catch (TelegramApiException e) {
+            logger.warning("Failed to answer callback query: " + e.getMessage());
         }
     }
 
@@ -1449,11 +1457,37 @@ public class KnifeBot extends TelegramLongPollingBot {
                 }
                 // Требование 2.1–2.5: Используем AlternativesParser для парсинга множественных альтернатив
                 List<com.knifecerts.dto.AlternativeEntry> parsedAlternatives = alternativesParser.parse(text);
-                for (com.knifecerts.dto.AlternativeEntry entry : parsedAlternatives) {
-                    String altStr = entry.brand() != null 
-                        ? entry.brand() + ALTERNATIVE_SEPARATOR + entry.name()
-                        : entry.name();
-                    state.getAlternatives().add(altStr);
+                
+                // Требование 2.7: Отображаем подтверждающее сообщение со списком распарсенных альтернатив
+                if (!parsedAlternatives.isEmpty()) {
+                    StringBuilder confirmationMsg = new StringBuilder("✅ Добавлено альтернатив: " + parsedAlternatives.size() + "\n\n");
+                    for (com.knifecerts.dto.AlternativeEntry entry : parsedAlternatives) {
+                        // Требование 2.8: Нормализация пробелов - всегда "Бренд / Название"
+                        String normalized = entry.brand() != null 
+                            ? entry.brand() + " / " + entry.name()
+                            : entry.name();
+                        confirmationMsg.append("• ").append(normalized).append("\n");
+                        state.getAlternatives().add(normalized);
+                    }
+                    
+                    try {
+                        SendMessage confirmMessage = new SendMessage();
+                        confirmMessage.setChatId(chatId.toString());
+                        confirmMessage.setText(confirmationMsg.toString());
+                        Message sent = execute(confirmMessage);
+                        
+                        // Удаляем подтверждающее сообщение через 3 секунды
+                        new Thread(() -> {
+                            try {
+                                Thread.sleep(3000);
+                                deleteMessage(chatId, sent.getMessageId());
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }).start();
+                    } catch (Exception e) {
+                        logger.warning("Failed to send confirmation message: " + e.getMessage());
+                    }
                 }
                 break;
         }
@@ -1584,7 +1618,7 @@ public class KnifeBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleFormSubmit(Long userId, Long chatId, String callbackQueryId) {
+    private void handleFormSubmit(Long userId, Long chatId) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null || state.getPhotoFileId() == null) {
@@ -1637,18 +1671,6 @@ public class KnifeBot extends TelegramLongPollingBot {
             }
             
             deleteAllExceptMainMenu(userId, chatId);
-            
-            // Требование 7.1: Отправляем toast notification через answerCallbackQuery
-            try {
-                org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
-                    new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
-                answer.setCallbackQueryId(callbackQueryId);
-                answer.setText("✅ Заявка отправлена на модерацию");
-                answer.setShowAlert(false); // Toast notification, не popup
-                execute(answer);
-            } catch (TelegramApiException e) {
-                logger.warning("Failed to send callback notification: " + e.getMessage());
-            }
             
             state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
             state.clearFormData();

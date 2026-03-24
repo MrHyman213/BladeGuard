@@ -71,8 +71,9 @@ public class SubmissionBufferService {
         Optional<SubmissionBuffer> submissionOpt = submissionBufferRepository.findById(submissionId);
         if (submissionOpt.isPresent()) {
             SubmissionBuffer submission = submissionOpt.get();
+            // Требование 2.8: Нормализация пробелов - всегда "Бренд / Название"
             String altEntry = brandName != null && !brandName.isEmpty() 
-                ? brandName + "/" + modelName 
+                ? brandName + " / " + modelName 
                 : modelName;
             
             String current = submission.getAlternatives();
@@ -182,7 +183,8 @@ public class SubmissionBufferService {
         // Обрабатываем альтернативы из TEXT поля
         String alternativesStr = submission.getAlternatives();
         if (alternativesStr != null && !alternativesStr.isEmpty()) {
-            AlternativesParser parser = new AlternativesParserImpl("/");
+            // Используем разделитель с пробелами для парсинга
+            AlternativesParser parser = new AlternativesParserImpl(" / ");
             List<AlternativeEntry> alternatives = parser.parse(alternativesStr);
 
             for (AlternativeEntry altEntry : alternatives) {

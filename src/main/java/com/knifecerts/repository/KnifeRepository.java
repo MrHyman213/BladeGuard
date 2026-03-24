@@ -26,10 +26,10 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     @Query("SELECT k FROM Knife k WHERE k.model.id = :modelId AND k.brand.id = :brandId AND k.photoPath IS NOT NULL")
     Optional<Knife> findCertificateByModelAndBrand(@Param("modelId") Long modelId, @Param("brandId") Long brandId);
     
-    @Query("SELECT k FROM Knife k WHERE k.photoPath IS NOT NULL")
+    @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand WHERE k.photoPath IS NOT NULL")
     List<Knife> findAllCertificates();
     
-    @Query("SELECT k FROM Knife k JOIN k.model m JOIN k.brand b " +
+    @Query("SELECT k FROM Knife k JOIN FETCH k.model m JOIN FETCH k.brand b " +
            "WHERE LOWER(m.name) LIKE LOWER(CONCAT('%', :query, '%')) " +
            "OR LOWER(b.name) LIKE LOWER(CONCAT('%', :query, '%')) " +
            "OR LOWER(k.index) LIKE LOWER(CONCAT('%', :query, '%'))")
@@ -38,10 +38,10 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     @Query("SELECT DISTINCT k.brand FROM Knife k WHERE k.photoPath IS NOT NULL ORDER BY k.brand.name")
     List<Brand> findAllBrandsWithCertificates();
     
-    @Query("SELECT k FROM Knife k WHERE k.brand = :brand AND k.photoPath IS NOT NULL ORDER BY k.model.name")
+    @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand WHERE k.brand = :brand AND k.photoPath IS NOT NULL ORDER BY k.model.name")
     List<Knife> findCertificatesByBrand(@Param("brand") Brand brand);
     
-    @Query("SELECT k FROM Knife k WHERE k.brand = :brand ORDER BY k.model.name")
+    @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand WHERE k.brand = :brand ORDER BY k.model.name")
     List<Knife> findAllByBrand(@Param("brand") Brand brand);
     
     @Query("SELECT k FROM Knife k WHERE k.model.name = :modelName AND k.brand.name = :brandName AND k.index = :index")

@@ -21,6 +21,7 @@ import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageReplyMarkup;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
@@ -290,6 +291,7 @@ public class AdminBot extends TelegramLongPollingBot {
         private Long duplicateKnifeId; // ID дубликата ножа (если найден)
         private Integer duplicateMessageId; // ID сообщения с предложением замены фото
         private Integer confirmationMessageId; // ID сообщения-подтверждения альтернатив (Req 14.8)
+        private Long pendingSubmissionId; // ID заявки, на которую хотим переключиться (для подтверждения)
         
         public Long getDuplicateKnifeId() { return duplicateKnifeId; }
         public void setDuplicateKnifeId(Long knifeId) { this.duplicateKnifeId = knifeId; }
@@ -297,6 +299,8 @@ public class AdminBot extends TelegramLongPollingBot {
         public void setDuplicateMessageId(Integer messageId) { this.duplicateMessageId = messageId; }
         public Integer getConfirmationMessageId() { return confirmationMessageId; }
         public void setConfirmationMessageId(Integer messageId) { this.confirmationMessageId = messageId; }
+        public Long getPendingSubmissionId() { return pendingSubmissionId; }
+        public void setPendingSubmissionId(Long submissionId) { this.pendingSubmissionId = submissionId; }
     }
 
     @Override
@@ -428,11 +432,26 @@ public class AdminBot extends TelegramLongPollingBot {
         String data = callbackQuery.getData();
         Long chatId = callbackQuery.getMessage().getChatId();
         Long moderatorId = callbackQuery.getFrom().getId();
+        String toastMessage = null; // Сообщение для Toast-уведомления
         
         try {
             // При любой кнопке главного меню - удаляем последние сообщения
             if (data.startsWith("menu_")) {
                 deleteRecentMessages(chatId, callbackQuery.getMessage().getMessageId());
+            }
+            
+            // Обработка выбора бренда в главном меню админа
+            if (data.startsWith("admin_brand_")) {
+                String brandName = data.substring(12);
+                handleAdminBrandSelection(chatId, brandName);
+                return;
+            } else if (data.startsWith("admin_main_page_")) {
+                int page = Integer.parseInt(data.substring(16));
+                updateAdminMainMenu(chatId, page);
+                return;
+            } else if (data.equals("admin_main_current_page")) {
+                // Ignore - это просто индикатор страницы
+                return;
             }
             
             if (data.equals("menu_pending")) {
@@ -450,6 +469,11 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleErrorLog(chatId);
             } else if (data.equals("menu_settings")) {
                 handleSettingsCommand(chatId);
+            } else if (data.equals("menu_back_to_main")) {
+                // Удаляем все сообщения кроме главного меню
+                deleteRecentMessages(chatId, null);
+                // Главное меню уже есть, просто возвращаемся к нему
+                return;
             } else if (data.equals("settings_change_separator")) {
                 handleChangeSeparatorRequest(chatId);
             } else if (data.equals("error_log_clear")) {
@@ -464,8 +488,10 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleUploadEditAlt(chatId);
             } else if (data.equals("upload_save")) {
                 handleUploadSave(chatId);
+                toastMessage = "💾 Сертификат сохранен";
             } else if (data.equals("upload_add")) {
                 handleUploadAdd(chatId);
+                toastMessage = "➕ Альтернатива добавлена";
             } else if (data.equals("upload_cancel")) {
                 handleUploadCancelRequest(chatId);
             } else if (data.equals("upload_cancel_confirm")) {
@@ -507,19 +533,25 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Очищаем навигационный стек до уровня 0
                 navigationStackService.clearFrom(chatId, 1);
                 
-                sendMainMenu(chatId);
+                // Проверяем, есть ли уже главное меню
+                if (messages == null || messages.getMainMenuMessageId() == null) {
+                    sendMainMenu(chatId);
+                }
+                // Если главное меню уже есть - ничего не делаем
             } else if (data.startsWith("view_approved_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 showApprovedSubmissionDetails(chatId, submissionId);
             } else if (data.startsWith("view_")) {
                 Long submissionId = Long.parseLong(data.substring(5));
-                showSubmissionDetails(chatId, submissionId);
+                handleViewSubmissionWithCheck(chatId, submissionId);
             } else if (data.startsWith("approve_")) {
                 Long submissionId = Long.parseLong(data.substring(8));
                 handleApproveCallback(chatId, moderatorId, submissionId);
+                toastMessage = "✅ Заявка одобрена";
             } else if (data.startsWith("reject_")) {
                 Long submissionId = Long.parseLong(data.substring(7));
                 handleRejectCallback(chatId, moderatorId, submissionId);
+                toastMessage = "❌ Заявка отклонена";
             } else if (data.startsWith("mod_edit_name_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 handleModEditField(chatId, submissionId, "name");
@@ -548,12 +580,18 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.startsWith("mod_approve_")) {
                 Long submissionId = Long.parseLong(data.substring(12));
                 handleModApprove(chatId, moderatorId, submissionId);
+                toastMessage = "✅ Заявка одобрена";
             } else if (data.startsWith("mod_reject_")) {
                 Long submissionId = Long.parseLong(data.substring(11));
                 handleModRejectRequest(chatId, submissionId);
+            } else if (data.startsWith("mod_save_exit_")) {
+                Long submissionId = Long.parseLong(data.substring(14));
+                handleModSaveAndExit(chatId, submissionId);
+                toastMessage = "💾 Изменения сохранены";
             } else if (data.startsWith("confirm_reject_")) {
                 Long submissionId = Long.parseLong(data.substring(15));
                 handleModReject(chatId, moderatorId, submissionId);
+                toastMessage = "❌ Заявка отклонена";
             } else if (data.startsWith("cancel_reject_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 handleCancelRejectConfirmation(chatId, submissionId);
@@ -586,15 +624,18 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.startsWith("approved_save_confirm_")) {
                 Long submissionId = Long.parseLong(data.substring(22));
                 handleApprovedSaveConfirm(chatId, submissionId);
+                toastMessage = "💾 Изменения сохранены";
             } else if (data.startsWith("approved_save_no_")) {
                 Long submissionId = Long.parseLong(data.substring(17));
                 handleApprovedSaveNo(chatId, submissionId);
             } else if (data.startsWith("approved_save_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 handleApprovedSave(chatId, submissionId);
+                toastMessage = "💾 Изменения сохранены";
             } else if (data.startsWith("approved_delete_")) {
                 Long submissionId = Long.parseLong(data.substring(16));
                 handleApprovedDelete(chatId, submissionId);
+                toastMessage = "🗑️ Сертификат удален";
             } else if (data.startsWith("approved_cancel_confirm_")) {
                 Long submissionId = Long.parseLong(data.substring(24));
                 handleApprovedCancelConfirm(chatId, submissionId);
@@ -671,10 +712,19 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.startsWith("mod_replace_photo_no_")) {
                 Long submissionId = Long.parseLong(data.substring(21));
                 handleDuplicatePhotoNo(chatId, submissionId);
+            } else if (data.startsWith("switch_confirm_yes_")) {
+                Long submissionId = Long.parseLong(data.substring(19));
+                handleSwitchConfirmYes(chatId, submissionId);
+            } else if (data.equals("switch_confirm_no")) {
+                handleSwitchConfirmNo(chatId);
             }
             
             AnswerCallbackQuery answer = new AnswerCallbackQuery();
             answer.setCallbackQueryId(callbackQuery.getId());
+            if (toastMessage != null) {
+                answer.setText(toastMessage);
+                answer.setShowAlert(false); // Toast notification, не popup
+            }
             execute(answer);
             
         } catch (Exception e) {
@@ -697,16 +747,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
             
-            if (knifeBot != null) {
-                Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-                if (submissionOpt.isPresent()) {
-                    SubmissionBuffer submission = submissionOpt.get();
-                    String userMessage = "✅ Ваша заявка #" + submission.getId() + " одобрена!\n\n" +
-                            "Сертификат добавлен в систему.";
-                    knifeBot.notifyUser(submission.getUserId(), userMessage);
-                }
-            }
-            
             sendMainMenu(chatId);
             
         } catch (Exception e) {
@@ -723,16 +763,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 return;
             }
             
-            SubmissionBuffer submission = submissionOpt.get();
             submissionBufferService.rejectSubmission(submissionId);
             
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
-            
-            if (knifeBot != null) {
-                String userMessage = "❌ Ваша заявка #" + submission.getId() + " отклонена.\n\n" +
-                        "Вы можете подать новую заявку командой /submit";
-                knifeBot.notifyUser(submission.getUserId(), userMessage);
-            }
             
             sendMainMenu(chatId);
             
@@ -1561,17 +1594,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
             
-            if (knifeBot != null) {
-                // Получаем информацию о пользователе из заявки перед удалением
-                Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-                if (submissionOpt.isPresent()) {
-                    SubmissionBuffer submission = submissionOpt.get();
-                    String userMessage = "✅ Ваша заявка #" + submission.getId() + " одобрена!\n\n" +
-                            "Сертификат добавлен в систему.";
-                    knifeBot.notifyUser(submission.getUserId(), userMessage);
-                }
-            }
-            
         } catch (NumberFormatException e) {
             sendMessage(chatId, "❌ Неверный формат ID. Используйте: /approve <ID>");
         } catch (Exception e) {
@@ -1590,23 +1612,15 @@ public class AdminBot extends TelegramLongPollingBot {
             
             Long submissionId = Long.parseLong(parts[1]);
             
-            // Получаем информацию о пользователе перед удалением заявки
             Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
             if (submissionOpt.isEmpty()) {
                 sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена");
                 return;
             }
             
-            SubmissionBuffer submission = submissionOpt.get();
             submissionBufferService.rejectSubmission(submissionId);
             
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
-            
-            if (knifeBot != null) {
-                String userMessage = "❌ Ваша заявка #" + submission.getId() + " отклонена.\n\n" +
-                        "Вы можете подать новую заявку командой /submit";
-                knifeBot.notifyUser(submission.getUserId(), userMessage);
-            }
             
         } catch (NumberFormatException e) {
             sendMessage(chatId, "❌ Неверный формат ID. Используйте: /reject <ID>");
@@ -1640,73 +1654,167 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void sendMainMenu(Long chatId) {
-        SendMessage message = new SendMessage();
-        message.setChatId(chatId.toString());
-        message.setText("🔧 Панель администратора\n\nВыберите действие:");
-        
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        
-        // Первая строка
-        List<InlineKeyboardButton> row1 = new ArrayList<>();
-        row1.add(InlineKeyboardButton.builder()
-            .text("📋 Ожидающие заявки")
-            .callbackData("menu_pending")
-            .build());
-        keyboard.add(row1);
-        
-        // Вторая строка
-        List<InlineKeyboardButton> row2 = new ArrayList<>();
-        row2.add(InlineKeyboardButton.builder()
-            .text("✅ Одобренные сертификаты")
-            .callbackData("menu_approved")
-            .build());
-        keyboard.add(row2);
-        
-        // Третья строка - поиск
-        List<InlineKeyboardButton> row3 = new ArrayList<>();
-        row3.add(InlineKeyboardButton.builder()
-            .text("🔍 Поиск")
-            .callbackData("menu_search")
-            .build());
-        keyboard.add(row3);
-        
-        // Четвертая строка
-        List<InlineKeyboardButton> row4 = new ArrayList<>();
-        row4.add(InlineKeyboardButton.builder()
-            .text("📤 Загрузить фото")
-            .callbackData("menu_upload")
-            .build());
-        keyboard.add(row4);
-        
-        // Пятая строка
-        List<InlineKeyboardButton> row5 = new ArrayList<>();
-        row5.add(InlineKeyboardButton.builder()
-            .text("📋 Журнал ошибок")
-            .callbackData("menu_error_log")
-            .build());
-        keyboard.add(row5);
-        
-        // Шестая строка
-        List<InlineKeyboardButton> row6 = new ArrayList<>();
-        row6.add(InlineKeyboardButton.builder()
-            .text("⚙️ Настройки")
-            .callbackData("menu_settings")
-            .build());
-        keyboard.add(row6);
-        
-        markup.setKeyboard(keyboard);
-        message.setReplyMarkup(markup);
-        
         try {
+            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+            
+            int itemsPerPage = 30;
+            int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            int page = 0; // Всегда показываем первую страницу
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allBrands.size());
+            List<Brand> pageBrands = allBrands.subList(startIndex, endIndex);
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🔧 **Админ-панель**");
+            message.setParseMode("Markdown");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            // Сетка брендов (3 колонки)
+            List<InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageBrands.size(); i++) {
+                Brand brand = pageBrands.get(i);
+                String displayName = brand.getName();
+                if (displayName.length() > 15) {
+                    displayName = displayName.substring(0, 12) + "...";
+                }
+                
+                currentRow.add(InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("admin_brand_" + brand.getName())
+                    .build());
+                
+                if (currentRow.size() == 3) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Пагинация (если нужна)
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData("admin_main_page_" + (totalPages - 1))
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("1/" + totalPages)
+                    .callbackData("admin_main_current_page")
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData("admin_main_page_1")
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            // Кнопка поиска
+            List<InlineKeyboardButton> searchRow = new ArrayList<>();
+            searchRow.add(InlineKeyboardButton.builder()
+                .text("🔍 Поиск")
+                .callbackData("menu_search")
+                .build());
+            keyboard.add(searchRow);
+            
+            // Кнопка загрузки
+            List<InlineKeyboardButton> uploadRow = new ArrayList<>();
+            uploadRow.add(InlineKeyboardButton.builder()
+                .text("📤 Загрузить")
+                .callbackData("menu_upload")
+                .build());
+            keyboard.add(uploadRow);
+            
+            // Кнопка ожидающих заявок
+            List<InlineKeyboardButton> pendingRow = new ArrayList<>();
+            pendingRow.add(InlineKeyboardButton.builder()
+                .text("📋 Ожидающие заявки")
+                .callbackData("menu_pending")
+                .build());
+            keyboard.add(pendingRow);
+            
+            // Кнопка журнала ошибок
+            List<InlineKeyboardButton> errorLogRow = new ArrayList<>();
+            errorLogRow.add(InlineKeyboardButton.builder()
+                .text("📋 Журнал ошибок")
+                .callbackData("menu_error_log")
+                .build());
+            keyboard.add(errorLogRow);
+            
+            // Кнопка настроек
+            List<InlineKeyboardButton> settingsRow = new ArrayList<>();
+            settingsRow.add(InlineKeyboardButton.builder()
+                .text("⚙️ Настройки")
+                .callbackData("menu_settings")
+                .build());
+            keyboard.add(settingsRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
             Message sent = execute(message);
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setMainMenuMessageId(sent.getMessageId());
             
             // Устанавливаем главное меню на уровень 0 стека
             navigationStackService.setLevel(chatId, 0, sent.getMessageId());
-        } catch (TelegramApiException e) {
-            logger.severe("Error sending menu: " + e.getMessage());
+        } catch (Exception e) {
+            logger.severe("Error sending admin menu: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Проверяет наличие несохраненных изменений перед переключением на другую заявку.
+     * Если изменения есть - показывает подтверждение, иначе - сразу открывает заявку.
+     */
+    private void handleViewSubmissionWithCheck(Long chatId, Long submissionId) {
+        ModerationState currentState = moderationStates.get(chatId);
+        
+        // Если есть текущее состояние и есть несохраненные изменения
+        if (currentState != null && currentState.hasChanges()) {
+            // Сохраняем ID новой заявки для последующего открытия
+            currentState.setPendingSubmissionId(submissionId);
+            
+            // Показываем подтверждение
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("⚠️ У вас есть несохраненные изменения в текущей заявке.\n\n" +
+                    "Закрыть текущую заявку без сохранения?");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            List<InlineKeyboardButton> row = new ArrayList<>();
+            InlineKeyboardButton yesBtn = new InlineKeyboardButton();
+            yesBtn.setText("✅ Да, закрыть");
+            yesBtn.setCallbackData("switch_confirm_yes_" + submissionId);
+            row.add(yesBtn);
+            
+            InlineKeyboardButton noBtn = new InlineKeyboardButton();
+            noBtn.setText("❌ Нет");
+            noBtn.setCallbackData("switch_confirm_no");
+            row.add(noBtn);
+            
+            keyboard.add(row);
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            try {
+                Message sentMessage = executeAndTrack(message);
+                currentState.setConfirmationMessageId(sentMessage.getMessageId());
+            } catch (TelegramApiException e) {
+                logger.severe("Ошибка при отправке подтверждения: " + e.getMessage());
+            }
+        } else {
+            // Нет изменений - сразу открываем новую заявку
+            showSubmissionDetails(chatId, submissionId);
         }
     }
     
@@ -1877,6 +1985,16 @@ public class AdminBot extends TelegramLongPollingBot {
             .callbackData("mod_reject_" + submissionId)
             .build());
         keyboard.add(actionRow);
+        
+        // Кнопка "Сохранить и выйти" — только если есть изменения
+        if (state.hasChanges()) {
+            List<InlineKeyboardButton> saveRow = new ArrayList<>();
+            saveRow.add(InlineKeyboardButton.builder()
+                .text("💾 Сохранить и выйти")
+                .callbackData("mod_save_exit_" + submissionId)
+                .build());
+            keyboard.add(saveRow);
+        }
         
         // Кнопка отмены
         List<InlineKeyboardButton> cancelRow = new ArrayList<>();
@@ -2492,12 +2610,11 @@ public class AdminBot extends TelegramLongPollingBot {
     private void showAltConfirmation(Long chatId, Long submissionId, List<String> pendingAlts, ModerationState state) {
         try {
             StringBuilder text = new StringBuilder();
-            text.append("📋 Подтверждение альтернатив\n\n");
-            text.append("Будут добавлены следующие альтернативы:\n\n");
+            text.append("🔄 Найдены новые альтернативы:\n");
             for (String alt : pendingAlts) {
                 text.append("• ").append(alt).append("\n");
             }
-            text.append("\nПодтвердить добавление?");
+            text.append("\nЗавершить добавление?");
             
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> rows = new ArrayList<>();
@@ -2711,13 +2828,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 } catch (Exception e) {
                     logger.warning("Failed to delete prompt: " + e.getMessage());
                 }
-            }
-            
-            // Уведомляем пользователя
-            if (knifeBot != null) {
-                String userMessage = "✅ Ваша заявка #" + submission.getId() + " одобрена!\n\n" +
-                        "Сертификат добавлен в систему.";
-                knifeBot.notifyUser(submission.getUserId(), userMessage);
             }
             
             // Ищем транзитивные альтернативы (Req 9.1–9.5)
@@ -2997,13 +3107,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
             
-            // Уведомляем пользователя
-            if (knifeBot != null) {
-                String userMessage = "❌ Ваша заявка #" + submission.getId() + " отклонена.\n\n" +
-                        "Вы можете подать новую заявку командой /submit";
-                knifeBot.notifyUser(submission.getUserId(), userMessage);
-            }
-            
             // Возвращаемся к списку
             handlePendingCommand(chatId);
             
@@ -3124,6 +3227,146 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
             }
             messages.clearOtherMessages();
+        }
+    }
+    
+    /**
+     * Обработчик подтверждения переключения на другую заявку (Да, закрыть текущую).
+     */
+    private void handleSwitchConfirmYes(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        
+        if (state != null) {
+            // Удаляем сообщение-подтверждение
+            if (state.getConfirmationMessageId() != null) {
+                deleteMessage(chatId, state.getConfirmationMessageId());
+            }
+            
+            // Удаляем форму текущей заявки
+            if (state.getFormMessageId() != null) {
+                deleteMessage(chatId, state.getFormMessageId());
+            }
+            
+            // Удаляем сообщение-запрос, если есть
+            if (state.getPromptMessageId() != null) {
+                deleteMessage(chatId, state.getPromptMessageId());
+            }
+            
+            // Очищаем состояние
+            moderationStates.remove(chatId);
+        }
+        
+        // Открываем новую заявку
+        showSubmissionDetails(chatId, submissionId);
+    }
+    
+    /**
+     * Обработчик отмены переключения на другую заявку (Нет, остаться).
+     */
+    private void handleSwitchConfirmNo(Long chatId) {
+        ModerationState state = moderationStates.get(chatId);
+        
+        if (state != null) {
+            // Удаляем сообщение-подтверждение
+            if (state.getConfirmationMessageId() != null) {
+                deleteMessage(chatId, state.getConfirmationMessageId());
+                state.setConfirmationMessageId(null);
+            }
+            
+            // Очищаем ID ожидающей заявки
+            state.setPendingSubmissionId(null);
+        }
+    }
+    
+    /**
+     * Сохраняет изменения в заявке и возвращается к списку ожидающих заявок.
+     * Реализация требования из WORKFLOW.md: кнопка "Сохранить и выйти" появляется
+     * только если администратор внес изменения в форму модерации.
+     */
+    private void handleModSaveAndExit(Long chatId, Long submissionId) {
+        ModerationState state = moderationStates.get(chatId);
+        if (state == null) {
+            sendMessage(chatId, "❌ Состояние не найдено");
+            return;
+        }
+        
+        try {
+            // Получаем оригинальную заявку
+            Optional<SubmissionBuffer> submissionOpt = submissionBufferRepository.findById(submissionId);
+            if (submissionOpt.isEmpty()) {
+                sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена");
+                return;
+            }
+            
+            SubmissionBuffer submission = submissionOpt.get();
+            
+            // Сохраняем изменения в базу данных
+            submission.setModelName(state.getName());
+            submission.setBrandName(state.getBrand());
+            submission.setIndex(state.getIndexCode());
+            
+            // Сохраняем альтернативы в формате "Бренд / Название, Бренд / Название"
+            if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                String alternativesStr = String.join(", ", state.getAlternativeModels());
+                submission.setAlternatives(alternativesStr);
+            } else {
+                submission.setAlternatives(null);
+            }
+            
+            submissionBufferRepository.save(submission);
+            
+            // Удаляем форму заявки
+            if (state.getFormMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getFormMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete form message: " + e.getMessage());
+                }
+            }
+            
+            // Удаляем сообщение-запрос, если оно есть
+            if (state.getPromptMessageId() != null) {
+                try {
+                    DeleteMessage deleteMsg = new DeleteMessage();
+                    deleteMsg.setChatId(chatId.toString());
+                    deleteMsg.setMessageId(state.getPromptMessageId());
+                    execute(deleteMsg);
+                } catch (Exception e) {
+                    logger.warning("Failed to delete prompt message: " + e.getMessage());
+                }
+            }
+            
+            // Удаляем другие сообщения
+            ChatMessages messages = chatMessages.get(chatId);
+            if (messages != null) {
+                for (Integer msgId : messages.getOtherMessageIds()) {
+                    try {
+                        DeleteMessage deleteMsg = new DeleteMessage();
+                        deleteMsg.setChatId(chatId.toString());
+                        deleteMsg.setMessageId(msgId);
+                        execute(deleteMsg);
+                    } catch (Exception e) {
+                        // Игнорируем
+                    }
+                }
+                messages.clearOtherMessages();
+            }
+            
+            // Очищаем состояние модерации
+            moderationStates.remove(chatId);
+            
+            // Обновляем список ожидающих заявок
+            updatePendingListIfNeeded(chatId);
+            
+            logger.info("Изменения в заявке #" + submissionId + " сохранены");
+            
+        } catch (Exception e) {
+            logger.severe("Ошибка при сохранении изменений: " + e.getMessage());
+            logError("Сохранение изменений заявки #" + submissionId, e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при сохранении изменений: " + e.getMessage());
         }
     }
     
@@ -4667,5 +4910,188 @@ public class AdminBot extends TelegramLongPollingBot {
         String trimmedName = name.trim();
         return knifeModelRepository.findByName(trimmedName)
                 .orElseGet(() -> knifeModelRepository.save(new KnifeModel(trimmedName)));
+    }
+    
+    private void handleAdminBrandSelection(Long chatId, String brandName) {
+        try {
+            // Удаляем все сообщения уровня 1 и выше
+            List<Integer> messagesToDelete = navigationStackService.getMessagesAtOrBelow(chatId, 1);
+            for (Integer messageId : messagesToDelete) {
+                deleteMessage(chatId, messageId);
+            }
+            navigationStackService.clearFrom(chatId, 1);
+            
+            // Показываем список моделей бренда (аналогично KnifeBot)
+            List<Knife> knives = knifeService.getAllKnivesByBrand(brandName);
+            
+            if (knives.isEmpty()) {
+                sendMessage(chatId, "❌ У бренда " + brandName + " нет моделей");
+                return;
+            }
+            
+            SendMessage message = new SendMessage();
+            message.setChatId(chatId.toString());
+            message.setText("🏷️ " + brandName + "\nВсего: " + knives.size() + " моделей");
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            // Список моделей (до 20 на странице)
+            int itemsPerPage = 20;
+            int endIndex = Math.min(itemsPerPage, knives.size());
+            
+            List<InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < endIndex; i++) {
+                Knife knife = knives.get(i);
+                String displayName = knife.getDisplayName();
+                if (displayName.length() > 30) {
+                    displayName = displayName.substring(0, 27) + "...";
+                }
+                
+                currentRow.add(InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("view_approved_" + knife.getId())
+                    .build());
+                
+                if (currentRow.size() == 2) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Кнопка "Назад"
+            List<InlineKeyboardButton> backRow = new ArrayList<>();
+            backRow.add(InlineKeyboardButton.builder()
+                .text("🔙 К главному меню")
+                .callbackData("menu_back_to_main")
+                .build());
+            keyboard.add(backRow);
+            
+            markup.setKeyboard(keyboard);
+            message.setReplyMarkup(markup);
+            
+            Message sent = execute(message);
+            navigationStackService.setLevel(chatId, 1, sent.getMessageId());
+            
+        } catch (Exception e) {
+            logger.severe("Error handling admin brand selection: " + e.getMessage());
+            sendMessage(chatId, "❌ Ошибка при загрузке моделей бренда");
+        }
+    }
+    
+    private void updateAdminMainMenu(Long chatId, int page) {
+        try {
+            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+            
+            int itemsPerPage = 30;
+            int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
+            if (totalPages == 0) totalPages = 1;
+            
+            page = ((page % totalPages) + totalPages) % totalPages;
+            
+            int startIndex = page * itemsPerPage;
+            int endIndex = Math.min(startIndex + itemsPerPage, allBrands.size());
+            List<Brand> pageBrands = allBrands.subList(startIndex, endIndex);
+            
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            
+            // Сетка брендов
+            List<InlineKeyboardButton> currentRow = new ArrayList<>();
+            for (int i = 0; i < pageBrands.size(); i++) {
+                Brand brand = pageBrands.get(i);
+                String displayName = brand.getName();
+                if (displayName.length() > 15) {
+                    displayName = displayName.substring(0, 12) + "...";
+                }
+                
+                currentRow.add(InlineKeyboardButton.builder()
+                    .text(displayName)
+                    .callbackData("admin_brand_" + brand.getName())
+                    .build());
+                
+                if (currentRow.size() == 3) {
+                    keyboard.add(currentRow);
+                    currentRow = new ArrayList<>();
+                }
+            }
+            
+            if (!currentRow.isEmpty()) {
+                keyboard.add(currentRow);
+            }
+            
+            // Пагинация
+            if (totalPages > 1) {
+                List<InlineKeyboardButton> paginationRow = new ArrayList<>();
+                int prevPage = (page - 1 + totalPages) % totalPages;
+                int nextPage = (page + 1) % totalPages;
+                
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("⬅️")
+                    .callbackData("admin_main_page_" + prevPage)
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text((page + 1) + "/" + totalPages)
+                    .callbackData("admin_main_current_page")
+                    .build());
+                paginationRow.add(InlineKeyboardButton.builder()
+                    .text("➡️")
+                    .callbackData("admin_main_page_" + nextPage)
+                    .build());
+                keyboard.add(paginationRow);
+            }
+            
+            // Остальные кнопки
+            List<InlineKeyboardButton> searchRow = new ArrayList<>();
+            searchRow.add(InlineKeyboardButton.builder()
+                .text("🔍 Поиск")
+                .callbackData("menu_search")
+                .build());
+            keyboard.add(searchRow);
+            
+            List<InlineKeyboardButton> uploadRow = new ArrayList<>();
+            uploadRow.add(InlineKeyboardButton.builder()
+                .text("📤 Загрузить")
+                .callbackData("menu_upload")
+                .build());
+            keyboard.add(uploadRow);
+            
+            List<InlineKeyboardButton> pendingRow = new ArrayList<>();
+            pendingRow.add(InlineKeyboardButton.builder()
+                .text("📋 Ожидающие заявки")
+                .callbackData("menu_pending")
+                .build());
+            keyboard.add(pendingRow);
+            
+            List<InlineKeyboardButton> errorLogRow = new ArrayList<>();
+            errorLogRow.add(InlineKeyboardButton.builder()
+                .text("📋 Журнал ошибок")
+                .callbackData("menu_error_log")
+                .build());
+            keyboard.add(errorLogRow);
+            
+            List<InlineKeyboardButton> settingsRow = new ArrayList<>();
+            settingsRow.add(InlineKeyboardButton.builder()
+                .text("⚙️ Настройки")
+                .callbackData("menu_settings")
+                .build());
+            keyboard.add(settingsRow);
+            
+            ChatMessages messages = chatMessages.get(chatId);
+            if (messages != null && messages.getMainMenuMessageId() != null) {
+                EditMessageReplyMarkup editMarkup = new EditMessageReplyMarkup();
+                editMarkup.setChatId(chatId.toString());
+                editMarkup.setMessageId(messages.getMainMenuMessageId());
+                editMarkup.setReplyMarkup(markup);
+                execute(editMarkup);
+            }
+            
+        } catch (Exception e) {
+            logger.severe("Error updating admin main menu: " + e.getMessage());
+        }
     }
 }

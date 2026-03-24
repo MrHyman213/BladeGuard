@@ -2,6 +2,7 @@ package com.knifecerts.service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -41,8 +42,9 @@ public class AlternativesParserImpl implements AlternativesParser {
                 continue;
             }
             
-            // Разбиваем каждый элемент по разделителю
-            String[] parts = trimmed.split("\\" + separator);
+            // Разбиваем каждый элемент по разделителю (с учетом пробелов вокруг)
+            // Используем Pattern.quote для корректной обработки специальных символов
+            String[] parts = trimmed.split(Pattern.quote(separator));
             
             // Trim каждой части
             for (int i = 0; i < parts.length; i++) {
