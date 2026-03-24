@@ -509,21 +509,8 @@ public class AdminBot extends TelegramLongPollingBot {
                     logger.warning("Failed to delete message: " + e.getMessage());
                 }
                 
-                // НОВОЕ: Удаляем все отслеживаемые сообщения
-                ChatMessages messages = chatMessages.get(chatId);
-                if (messages != null) {
-                    for (Integer msgId : messages.getOtherMessageIds()) {
-                        try {
-                            DeleteMessage deleteMsg = new DeleteMessage();
-                            deleteMsg.setChatId(chatId.toString());
-                            deleteMsg.setMessageId(msgId);
-                            execute(deleteMsg);
-                        } catch (Exception e) {
-                            // Игнорируем ошибки
-                        }
-                    }
-                    messages.clearOtherMessages();
-                }
+                // Вызываем deleteRecentMessages для удаления всех отслеживаемых сообщений
+                deleteRecentMessages(chatId, null);
                 
                 // Очищаем состояния
                 moderationStates.remove(chatId);
@@ -534,6 +521,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 navigationStackService.clearFrom(chatId, 1);
                 
                 // Проверяем, есть ли уже главное меню
+                ChatMessages messages = chatMessages.get(chatId);
                 if (messages == null || messages.getMainMenuMessageId() == null) {
                     sendMainMenu(chatId);
                 }
@@ -1630,7 +1618,7 @@ public class AdminBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendMessage(Long chatId, String text) {
+    private Message sendMessage(Long chatId, String text) {
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
         message.setText(text);
@@ -1640,8 +1628,10 @@ public class AdminBot extends TelegramLongPollingBot {
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setLastWindowMessageId(sent.getMessageId());
             logger.info("DEBUG: Saved lastWindowMessageId: " + sent.getMessageId());
+            return sent;
         } catch (TelegramApiException e) {
             logger.severe("Error sending message: " + e.getMessage());
+            return null;
         }
     }
     
@@ -1876,16 +1866,37 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
             }
             
-            // Отправляем новую форму с фото
-            String photoUrl = yandexDiskService.getDownloadUrl(submission.getPhotoPath());
+            // Отправляем новую форму с фото (если есть)
+            if (submission.getPhotoPath() != null && !submission.getPhotoPath().isEmpty()) {
+                try {
+                    String photoUrl = yandexDiskService.getDownloadUrl(submission.getPhotoPath());
+                    
+                    SendPhoto sendPhoto = new SendPhoto();
+                    sendPhoto.setChatId(chatId.toString());
+                    sendPhoto.setPhoto(new InputFile(photoUrl));
+                    sendPhoto.setCaption(caption.toString());
+                    sendPhoto.setReplyMarkup(markup);
+                    
+                    Message sentMessage = execute(sendPhoto);
+                    state.setFormMessageId(sentMessage.getMessageId());
+                    ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+                    messages.setLastWindowMessageId(sentMessage.getMessageId());
+                    
+                    // Устанавливаем форму модерации на уровень 2 стека
+                    navigationStackService.setLevel(chatId, 2, sentMessage.getMessageId());
+                    return;
+                } catch (Exception e) {
+                    logger.warning("Не удалось загрузить фото, отправляем текстовую форму: " + e.getMessage());
+                }
+            }
             
-            SendPhoto sendPhoto = new SendPhoto();
-            sendPhoto.setChatId(chatId.toString());
-            sendPhoto.setPhoto(new InputFile(photoUrl));
-            sendPhoto.setCaption(caption.toString());
-            sendPhoto.setReplyMarkup(markup);
+            // Если фото нет или не удалось загрузить - отправляем текстовое сообщение
+            SendMessage textMessage = new SendMessage();
+            textMessage.setChatId(chatId.toString());
+            textMessage.setText(caption.toString());
+            textMessage.setReplyMarkup(markup);
             
-            Message sentMessage = execute(sendPhoto);
+            Message sentMessage = execute(textMessage);
             state.setFormMessageId(sentMessage.getMessageId());
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.setLastWindowMessageId(sentMessage.getMessageId());
@@ -2081,27 +2092,44 @@ public class AdminBot extends TelegramLongPollingBot {
             caption.append("ID: #").append(knife.getId()).append("\n");
             caption.append("Статус: Одобрен\n");
             
-            // Отправляем фото с подписью
-            try {
-                String photoUrl = yandexDiskService.getDownloadUrl(knife.getPhotoPath());
-                SendPhoto photoMessage = new SendPhoto();
-                photoMessage.setChatId(chatId.toString());
-                photoMessage.setPhoto(new InputFile(photoUrl));
-                photoMessage.setCaption(caption.toString());
-                photoMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
+            // Отправляем фото с подписью (если есть)
+            if (knife.getPhotoPath() != null && !knife.getPhotoPath().isEmpty()) {
+                try {
+                    String photoUrl = yandexDiskService.getDownloadUrl(knife.getPhotoPath());
+                    SendPhoto photoMessage = new SendPhoto();
+                    photoMessage.setChatId(chatId.toString());
+                    photoMessage.setPhoto(new InputFile(photoUrl));
+                    photoMessage.setCaption(caption.toString());
+                    photoMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
+                    
+                    Message sentMessage = execute(photoMessage);
+                    state.setFormMessageId(sentMessage.getMessageId());
+                    ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+                    messages.setLastWindowMessageId(sentMessage.getMessageId());
+                    
+                } catch (Exception e) {
+                    logger.warning("Не удалось загрузить фото: " + e.getMessage());
+                    SendMessage textMessage = new SendMessage();
+                    textMessage.setChatId(chatId.toString());
+                    textMessage.setText(caption.toString() + "\n\n⚠️ Не удалось загрузить фото");
+                    textMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
+                    
+                    Message sentMessage = execute(textMessage);
+                    state.setFormMessageId(sentMessage.getMessageId());
+                    ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+                    messages.setLastWindowMessageId(sentMessage.getMessageId());
+                }
+            } else {
+                // Если фото нет, отправляем только текст
+                SendMessage textMessage = new SendMessage();
+                textMessage.setChatId(chatId.toString());
+                textMessage.setText(caption.toString() + "\n\n⚠️ Фото отсутствует");
+                textMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
                 
-                Message sentMessage = execute(photoMessage);
+                Message sentMessage = execute(textMessage);
                 state.setFormMessageId(sentMessage.getMessageId());
                 ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
                 messages.setLastWindowMessageId(sentMessage.getMessageId());
-                
-            } catch (Exception e) {
-                logger.warning("Не удалось загрузить фото: " + e.getMessage());
-                SendMessage textMessage = new SendMessage();
-                textMessage.setChatId(chatId.toString());
-                textMessage.setText(caption.toString() + "\n\n⚠️ Не удалось загрузить фото");
-                textMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
-                execute(textMessage);
             }
             
         } catch (Exception e) {
@@ -4036,7 +4064,7 @@ public class AdminBot extends TelegramLongPollingBot {
 
     private void handleAdminSearchRequest(Long chatId) {
         searchStates.put(chatId, "admin_search");
-        sendMessage(chatId, "🔍 Введите название бренда для поиска:");
+        Message sent = sendMessage(chatId, "🔍 Введите название бренда для поиска:");
     }
 
     private void handleAdminSearchPage(Long chatId, int page, String type, String searchQuery) {
