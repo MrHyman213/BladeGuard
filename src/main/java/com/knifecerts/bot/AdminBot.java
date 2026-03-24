@@ -1655,7 +1655,7 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void sendMainMenu(Long chatId) {
         try {
-            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+            List<Brand> allBrands = knifeService.getAllBrandsWithKnives();
             
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
@@ -1940,6 +1940,13 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Блок 2: Альтернативы
         
+        // Получаем список альтернатив из базы данных для проверки наличия сертификата
+        List<Knife> dbAlternatives = new ArrayList<>();
+        if (state.getOriginal() instanceof Knife) {
+            Knife knife = (Knife) state.getOriginal();
+            dbAlternatives = knifeService.getAllAlternatives(knife.getId());
+        }
+        
         // Разделитель альтернатив
         if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
             List<InlineKeyboardButton> separatorRow = new ArrayList<>();
@@ -1949,13 +1956,25 @@ public class AdminBot extends TelegramLongPollingBot {
                 .build());
             keyboard.add(separatorRow);
             
-            // Список альтернатив с кнопками удаления
+            // Список альтернатив с кнопками удаления и идентификаторами
             for (int i = 0; i < state.getAlternativeModels().size(); i++) {
-                String alt = state.getAlternativeModels().get(i);
+                String altStr = state.getAlternativeModels().get(i);
                 List<InlineKeyboardButton> altRow = new ArrayList<>();
-                String altText = alt.length() > 35 ? alt.substring(0, 32) + "..." : alt;
+                
+                // Проверяем, есть ли эта альтернатива в базе с сертификатом
+                boolean hasCertificate = false;
+                for (Knife alt : dbAlternatives) {
+                    String altDisplayName = alt.getBrand().getName() + " / " + alt.getModel().getName();
+                    if (altStr.equals(altDisplayName)) {
+                        hasCertificate = true;
+                        break;
+                    }
+                }
+                
+                String altText = altStr.length() > 35 ? altStr.substring(0, 32) + "..." : altStr;
+                String prefix = hasCertificate ? "✅ " : "❌ ";
                 altRow.add(InlineKeyboardButton.builder()
-                    .text("❌ " + altText)
+                    .text(prefix + altText)
                     .callbackData("mod_remove_alt_" + i + "_" + submissionId)
                     .build());
                 keyboard.add(altRow);
@@ -4117,6 +4136,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 .build());
             keyboard.add(backRow);
             
+            List<InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(menuRow);
+            
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
             
@@ -4210,6 +4236,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 .callbackData("admin_search_back")
                 .build());
             keyboard.add(backRow);
+            
+            List<InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(menuRow);
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -4329,6 +4362,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 .callbackData("admin_search_back")
                 .build());
             keyboard.add(backRow);
+            
+            List<InlineKeyboardButton> menuRow = new ArrayList<>();
+            menuRow.add(InlineKeyboardButton.builder()
+                .text("🔙 Главное меню")
+                .callbackData("back_to_menu")
+                .build());
+            keyboard.add(menuRow);
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -4985,7 +5025,7 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void updateAdminMainMenu(Long chatId, int page) {
         try {
-            List<Brand> allBrands = knifeService.getAllBrandsWithCertificates();
+            List<Brand> allBrands = knifeService.getAllBrandsWithKnives();
             
             int itemsPerPage = 30;
             int totalPages = (int) Math.ceil((double) allBrands.size() / itemsPerPage);
