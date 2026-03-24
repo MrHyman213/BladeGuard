@@ -1,0 +1,85 @@
+version: '3.8'
+
+# Production Docker Compose Configuration
+# Использование: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: knife-certs-db-prod
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    command: >
+      postgres
+      -c shared_buffers=32MB
+      -c effective_cache_size=64MB
+      -c maintenance_work_mem=16MB
+      -c work_mem=2MB
+      -c max_connections=20
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - knife-certs-network
+    mem_limit: 128m
+    mem_reservation: 64m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: knife-certs-bot-prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN}
+      TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME}
+      YANDEX_DISK_TOKEN: ${YANDEX_DISK_TOKEN}
+      YANDEX_DISK_FOLDER: ${YANDEX_DISK_FOLDER}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}?characterEncoding=UTF-8&useUnicode=true&client_encoding=UTF8
+      DATABASE_USERNAME: ${POSTGRES_USER}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      JAVA_OPTS: "-Xms128m -Xmx256m -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC -Xss256k"
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    restart: always
+    networks:
+      - knife-certs-network
+    mem_limit: 320m
+    mem_reservation: 256m
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  postgres_data_prod:
+    driver: local
+
+networks:
+  knife-certs-network:
+    driver: bridge

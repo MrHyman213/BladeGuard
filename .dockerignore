@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Maven
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test files
+src/test/
+
+# Database
+*.db
+.jqwik-database
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# Scripts
+*.bat
+*.cmd
+*.sh
+
+# Temporary files
+*.tmp
+*.bak
+*.backup

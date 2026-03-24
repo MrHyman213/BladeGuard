@@ -5,21 +5,27 @@ services:
     image: postgres:16-alpine
     container_name: knife-certs-db
     environment:
-      POSTGRES_DB: knife_certificates
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-knife_certificates}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    networks:
+      - knife-certs-network
 
   app:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: knife-certs-bot
     depends_on:
       postgres:
@@ -30,12 +36,27 @@ services:
       TELEGRAM_ADMIN_BOT_TOKEN: ${TELEGRAM_ADMIN_BOT_TOKEN}
       TELEGRAM_ADMIN_BOT_USERNAME: ${TELEGRAM_ADMIN_BOT_USERNAME}
       YANDEX_DISK_TOKEN: ${YANDEX_DISK_TOKEN}
-      YANDEX_DISK_FOLDER: ${YANDEX_DISK_FOLDER}
-      DATABASE_URL: jdbc:postgresql://postgres:5432/knife_certificates
-      DATABASE_USERNAME: postgres
-      DATABASE_PASSWORD: postgres
+      YANDEX_DISK_FOLDER: ${YANDEX_DISK_FOLDER:-app:/certificates}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-knife_certificates}?characterEncoding=UTF-8&useUnicode=true&client_encoding=UTF8
+      DATABASE_USERNAME: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:8080"
+    restart: unless-stopped
+    networks:
+      - knife-certs-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   postgres_data:
+    driver: local
+
+networks:
+  knife-certs-network:
+    driver: bridge

@@ -35,6 +35,8 @@ build/
 .kiro
 /docs/my
 .env
+.env.production
+.env.local
 *.log
 
 ### OS ###
