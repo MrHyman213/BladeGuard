@@ -34,6 +34,8 @@ import com.knifecerts.model.KnifeModel;
 import com.knifecerts.model.SubmissionBuffer;
 import com.knifecerts.repository.BrandRepository;
 import com.knifecerts.repository.KnifeModelRepository;
+import com.knifecerts.service.AlternativesParser;
+import com.knifecerts.service.CaptionParser;
 import com.knifecerts.service.ConversationStateManager;
 import com.knifecerts.service.KnifeService;
 import com.knifecerts.service.NavigationStackService;
@@ -74,6 +76,12 @@ public class KnifeBot extends TelegramLongPollingBot {
     
     @Autowired
     private NavigationStackService navigationStackService;
+    
+    @Autowired
+    private CaptionParser captionParser;
+    
+    @Autowired
+    private AlternativesParser alternativesParser;
     
     // Кэш для хранения последних разметок сообщений
     private final Map<Integer, InlineKeyboardMarkup> lastMarkupCache = new ConcurrentHashMap<>();
@@ -1139,17 +1147,17 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
 
     private void parseTemplate(ConversationState state, String caption) {
-        String separator = ALTERNATIVE_SEPARATOR;
-        String[] parts = caption.split(java.util.regex.Pattern.quote(separator));
+        // Требование 1.1–1.7: Используем CaptionParser для парсинга caption
+        com.knifecerts.dto.ParsedCaption parsed = captionParser.parse(caption);
         
-        if (parts.length >= 1) {
-            state.setBrand(parts[0].trim());
+        if (parsed.brand() != null) {
+            state.setBrand(parsed.brand());
         }
-        if (parts.length >= 2) {
-            state.setName(parts[1].trim());
+        if (parsed.name() != null) {
+            state.setName(parsed.name());
         }
-        if (parts.length >= 3) {
-            state.setIndexCode(parts[2].trim());
+        if (parsed.index() != null) {
+            state.setIndexCode(parsed.index());
         }
     }
 
@@ -1439,13 +1447,13 @@ public class KnifeBot extends TelegramLongPollingBot {
                 if (state.getAlternatives() == null) {
                     state.setAlternatives(new ArrayList<>());
                 }
-                // Поддержка ввода через запятую
-                String[] alternatives = text.split(",");
-                for (String alt : alternatives) {
-                    String trimmed = alt.trim();
-                    if (!trimmed.isEmpty()) {
-                        state.getAlternatives().add(trimmed);
-                    }
+                // Требование 2.1–2.5: Используем AlternativesParser для парсинга множественных альтернатив
+                List<com.knifecerts.dto.AlternativeEntry> parsedAlternatives = alternativesParser.parse(text);
+                for (com.knifecerts.dto.AlternativeEntry entry : parsedAlternatives) {
+                    String altStr = entry.brand() != null 
+                        ? entry.brand() + ALTERNATIVE_SEPARATOR + entry.name()
+                        : entry.name();
+                    state.getAlternatives().add(altStr);
                 }
                 break;
         }
@@ -1577,16 +1585,6 @@ public class KnifeBot extends TelegramLongPollingBot {
     }
 
     private void handleFormSubmit(Long userId, Long chatId, String callbackQueryId) {
-        // Answer callback immediately to avoid timeout
-        try {
-            org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
-                new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
-            answer.setCallbackQueryId(callbackQueryId);
-            execute(answer);
-        } catch (TelegramApiException e) {
-            logger.warning("Failed to answer callback query immediately: " + e.getMessage());
-        }
-        
         try {
             ConversationState state = conversationStateManager.getState(userId);
             if (state == null || state.getPhotoFileId() == null) {
@@ -1640,8 +1638,17 @@ public class KnifeBot extends TelegramLongPollingBot {
             
             deleteAllExceptMainMenu(userId, chatId);
             
-            // Send success notification via regular message
-            sendMessage(chatId, "✅ Заявка отправлена на модерацию");
+            // Требование 7.1: Отправляем toast notification через answerCallbackQuery
+            try {
+                org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery answer = 
+                    new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery();
+                answer.setCallbackQueryId(callbackQueryId);
+                answer.setText("✅ Заявка отправлена на модерацию");
+                answer.setShowAlert(false); // Toast notification, не popup
+                execute(answer);
+            } catch (TelegramApiException e) {
+                logger.warning("Failed to send callback notification: " + e.getMessage());
+            }
             
             state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
             state.clearFormData();

@@ -40,6 +40,7 @@ import com.knifecerts.repository.KnifeRepository;
 import com.knifecerts.repository.SubmissionBufferRepository;
 import com.knifecerts.service.AlternativesParser;
 import com.knifecerts.service.AlternativesParserImpl;
+import com.knifecerts.service.CaptionParser;
 import com.knifecerts.service.KnifeService;
 import com.knifecerts.service.MainMenuUpdateService;
 import com.knifecerts.service.NavigationStackService;
@@ -90,6 +91,12 @@ public class AdminBot extends TelegramLongPollingBot {
     
     @Autowired
     private MainMenuUpdateService mainMenuUpdateService;
+    
+    @Autowired
+    private CaptionParser captionParser;
+    
+    @Autowired
+    private AlternativesParser alternativesParser;
     
     // Хранилище состояний модерации для каждого чата
     private final java.util.Map<Long, ModerationState> moderationStates = new java.util.concurrent.ConcurrentHashMap<>();
@@ -777,6 +784,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 // Для ADMIN_WAITING_FOR_UPLOAD_PHOTO показываем форму добавления
                 if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO) {
+                    // Требование 15.3: Парсим caption через CaptionParser
+                    String caption = update.getMessage().getCaption();
+                    
                     // Сохраняем путь к фото в состояние для последующего заполнения формы
                     ModerationState state = moderationStates.get(chatId);
                     if (state == null) {
@@ -784,6 +794,20 @@ public class AdminBot extends TelegramLongPollingBot {
                         moderationStates.put(chatId, state);
                     }
                     state.setPhotoPath(newPath);
+                    
+                    // Парсим caption если он есть
+                    if (caption != null && !caption.trim().isEmpty()) {
+                        com.knifecerts.dto.ParsedCaption parsed = captionParser.parse(caption);
+                        if (parsed.brand() != null) {
+                            state.setBrand(parsed.brand());
+                        }
+                        if (parsed.name() != null) {
+                            state.setName(parsed.name());
+                        }
+                        if (parsed.index() != null) {
+                            state.setIndexCode(parsed.index());
+                        }
+                    }
                     
                     // Показываем форму добавления (Req 15.2)
                     sendUploadForm(chatId, state);
@@ -2234,13 +2258,13 @@ public class AdminBot extends TelegramLongPollingBot {
                 if (state.getAlternativeModels() == null) {
                     state.setAlternativeModels(new ArrayList<>());
                 }
-                // Поддержка ввода через запятую
-                String[] alternatives = text.split(",");
-                for (String alt : alternatives) {
-                    String trimmed = alt.trim();
-                    if (!trimmed.isEmpty()) {
-                        state.getAlternativeModels().add(trimmed);
-                    }
+                // Требование 2.1–2.5: Используем AlternativesParser для парсинга множественных альтернатив
+                List<AlternativeEntry> parsedAlternatives = alternativesParser.parse(text);
+                for (AlternativeEntry entry : parsedAlternatives) {
+                    String altStr = entry.brand() != null 
+                        ? entry.brand() + " / " + entry.name()
+                        : entry.name();
+                    state.getAlternativeModels().add(altStr);
                 }
                 break;
         }
