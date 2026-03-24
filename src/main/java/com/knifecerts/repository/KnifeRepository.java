@@ -20,6 +20,9 @@ public interface KnifeRepository extends JpaRepository<Knife, Long> {
     List<Knife> findByModelId(Long modelId);
     
     Optional<Knife> findByModelIdAndBrandId(Long modelId, Long brandId);
+
+    Optional<Knife> findByModelAndBrand(KnifeModel model, Brand brand);
+
     
     @Query("SELECT k FROM Knife k JOIN FETCH k.model JOIN FETCH k.brand LEFT JOIN FETCH k.alternatives WHERE k.id = :id")
     Optional<Knife> findByIdWithAlternatives(@Param("id") Long id);
