@@ -21,8 +21,6 @@ import com.knifecerts.repository.UserMainMenuRepository;
 /**
  * Сервис для автообновления главного меню у всех пользователей.
  * Используется при добавлении новых брендов для обновления меню KnifeBot и AdminBot.
- * 
- * Требования: 6.1–6.6
  */
 @Service
 public class MainMenuUpdateService {
@@ -50,8 +48,6 @@ public class MainMenuUpdateService {
      * Обновляет главное меню у всех пользователей KnifeBot.
      * Читает chatId и messageId из таблицы user_main_menu,
      * использует editMessage для обновления, пропускает пользователей при ошибке.
-     * 
-     * Требование: 6.1–6.4
      */
     public void updateAllUserMenus() {
         List<UserMainMenu> userMenus = userMainMenuRepository.findAll();
@@ -68,7 +64,6 @@ public class MainMenuUpdateService {
                 knifeBot.execute(editMessage);
                 logger.info("Главное меню обновлено для chatId=" + userMenu.getChatId());
             } catch (TelegramApiException e) {
-                // Требование 6.3: Пропускаем пользователей при ошибке (например, сообщение удалено)
                 logger.warning("Не удалось обновить меню для chatId=" + userMenu.getChatId() + 
                               ": " + e.getMessage());
             }
@@ -96,24 +91,12 @@ public class MainMenuUpdateService {
             Brand brand = brands.get(i);
             InlineKeyboardButton button = new InlineKeyboardButton();
             button.setText(brand.getName());
-            button.setCallbackData("brand:" + brand.getName());
+            button.setCallbackData("brand_" + brand.getName());
             keyboard.add(List.of(button));
         }
         
         // Кнопки навигации
-        List<InlineKeyboardButton> navRow = new java.util.ArrayList<>();
-        if (page > 0) {
-            InlineKeyboardButton prevButton = new InlineKeyboardButton();
-            prevButton.setText("⬅️");
-            prevButton.setCallbackData("page:" + (page - 1));
-            navRow.add(prevButton);
-        }
-        if (end < brands.size()) {
-            InlineKeyboardButton nextButton = new InlineKeyboardButton();
-            nextButton.setText("➡️");
-            nextButton.setCallbackData("page:" + (page + 1));
-            navRow.add(nextButton);
-        }
+        final var navRow = getInlineKeyboardButtons(page, end, brands);
         if (!navRow.isEmpty()) {
             keyboard.add(navRow);
         }
@@ -122,26 +105,41 @@ public class MainMenuUpdateService {
         List<InlineKeyboardButton> actionRow = new java.util.ArrayList<>();
         InlineKeyboardButton searchButton = new InlineKeyboardButton();
         searchButton.setText("🔍 Поиск");
-        searchButton.setCallbackData("search:brands");
+        searchButton.setCallbackData("search_brands");
         actionRow.add(searchButton);
         
         InlineKeyboardButton uploadButton = new InlineKeyboardButton();
         uploadButton.setText("📤 Загрузить");
-        uploadButton.setCallbackData("upload");
+        uploadButton.setCallbackData("upload_certificate");
         actionRow.add(uploadButton);
         keyboard.add(actionRow);
         
         markup.setKeyboard(keyboard);
         return markup;
     }
-    
+
+    private static List<InlineKeyboardButton> getInlineKeyboardButtons(int page, int end, List<Brand> brands) {
+        List<InlineKeyboardButton> navRow = new java.util.ArrayList<>();
+        if (page > 0) {
+            InlineKeyboardButton prevButton = new InlineKeyboardButton();
+            prevButton.setText("⬅️");
+            prevButton.setCallbackData("main_page_" + (page - 1));
+            navRow.add(prevButton);
+        }
+        if (end < brands.size()) {
+            InlineKeyboardButton nextButton = new InlineKeyboardButton();
+            nextButton.setText("➡️");
+            nextButton.setCallbackData("main_page_" + (page + 1));
+            navRow.add(nextButton);
+        }
+        return navRow;
+    }
+
     /**
      * Обновляет главное меню модератора (AdminBot).
      * Используется при добавлении новых брендов.
-     * 
-     * Требование: 6.5, 6.6
-     * 
-     * @param adminChatId chatId администратора
+     *
+     *  @param adminChatId chatId администратора
      * @param messageId ID главного меню администратора
      */
     public void updateAdminMenu(Long adminChatId, Integer messageId) {
@@ -183,7 +181,7 @@ public class MainMenuUpdateService {
             Brand brand = brands.get(i);
             InlineKeyboardButton button = new InlineKeyboardButton();
             button.setText(brand.getName());
-            button.setCallbackData("admin:brand:" + brand.getName());
+            button.setCallbackData("admin_brand_" + brand.getName());
             keyboard.add(List.of(button));
         }
         
@@ -191,24 +189,24 @@ public class MainMenuUpdateService {
         List<InlineKeyboardButton> actionRow1 = new java.util.ArrayList<>();
         InlineKeyboardButton pendingButton = new InlineKeyboardButton();
         pendingButton.setText("📋 Ожидающие");
-        pendingButton.setCallbackData("admin:pending");
+        pendingButton.setCallbackData("menu_pending");
         actionRow1.add(pendingButton);
         
         InlineKeyboardButton uploadButton = new InlineKeyboardButton();
         uploadButton.setText("📤 Загрузить");
-        uploadButton.setCallbackData("admin:upload");
+        uploadButton.setCallbackData("menu_upload");
         actionRow1.add(uploadButton);
         keyboard.add(actionRow1);
         
         List<InlineKeyboardButton> actionRow2 = new java.util.ArrayList<>();
         InlineKeyboardButton searchButton = new InlineKeyboardButton();
         searchButton.setText("🔍 Поиск");
-        searchButton.setCallbackData("admin:search:brands");
+        searchButton.setCallbackData("menu_search");
         actionRow2.add(searchButton);
         
         InlineKeyboardButton settingsButton = new InlineKeyboardButton();
         settingsButton.setText("⚙️ Настройки");
-        settingsButton.setCallbackData("admin:settings");
+        settingsButton.setCallbackData("menu_settings");
         actionRow2.add(settingsButton);
         keyboard.add(actionRow2);
         

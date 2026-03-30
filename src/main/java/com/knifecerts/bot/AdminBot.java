@@ -12,6 +12,9 @@ import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
+import com.knifecerts.model.*;
+import com.knifecerts.repository.*;
+import com.knifecerts.util.RowBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -28,17 +31,10 @@ import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import com.knifecerts.dto.AlternativeEntry;
-import com.knifecerts.model.Brand;
-import com.knifecerts.model.Knife;
-import com.knifecerts.model.KnifeModel;
-import com.knifecerts.model.SubmissionBuffer;
-import com.knifecerts.repository.BrandRepository;
-import com.knifecerts.repository.KnifeModelRepository;
-import com.knifecerts.repository.KnifeRepository;
-import com.knifecerts.repository.SubmissionBufferRepository;
 import com.knifecerts.service.AlternativesParser;
 import com.knifecerts.service.AlternativesParserImpl;
 import com.knifecerts.service.CaptionParser;
@@ -68,9 +64,6 @@ public class AdminBot extends TelegramLongPollingBot {
 
     @Autowired
     private KnifeService knifeService;
-
-    @Autowired
-    private KnifeBot knifeBot;
     
     @Autowired
     private NavigationStackService navigationStackService;
@@ -83,6 +76,9 @@ public class AdminBot extends TelegramLongPollingBot {
     
     @Autowired
     private KnifeRepository knifeRepository;
+
+    @Autowired
+    private UserMainMenuRepository userMainMenuRepository;
     
     @Autowired
     private TransitiveAlternativesService transitiveAlternativesService;
@@ -210,9 +206,9 @@ public class AdminBot extends TelegramLongPollingBot {
         
         public ModerationState(Knife original, boolean isApprovedView) {
             this.original = original;
-            this.name = original.getModel().getName();
-            this.brand = original.getBrand().getName();
-            this.indexCode = original.getIndex();
+            this.name = original.getModel() != null ? original.getModel().getName() : null;
+            this.brand = original.getBrand() != null ? original.getBrand().getName() : null;
+            this.indexCode = original.getIndex() != null ? original.getIndex() : null;
             this.alternativeModels = original.getAlternatives().stream()
                 .map(alt -> alt.getBrand().getName() + " / " + alt.getModel().getName())
                 .collect(java.util.stream.Collectors.toList());
@@ -327,30 +323,14 @@ public class AdminBot extends TelegramLongPollingBot {
                     Long moderatorId = update.getMessage().getFrom().getId();
 
                     if (messageText.equals("/start")) {
-                        // Удаляем команду /start
-                        try {
-                            DeleteMessage deleteMsg = new DeleteMessage();
-                            deleteMsg.setChatId(chatId.toString());
-                            deleteMsg.setMessageId(update.getMessage().getMessageId());
-                            execute(deleteMsg);
-                        } catch (Exception e) {
-                            logger.warning("Failed to delete /start command: " + e.getMessage());
-                        }
+                        // Удаляем отправленное пользователем сообщение
+                        deleteMessage(chatId, update.getMessage().getMessageId());
+                        // Удаляем старое главное меню перед отправкой нового
+                        ChatMessages oldMessages = chatMessages.get(chatId);
+                        if (oldMessages != null && oldMessages.getMainMenuMessageId() != null)
+                            deleteMessage(chatId, oldMessages.getMainMenuMessageId());
+                        
                         sendMainMenu(chatId);
-                    } else if (messageText.equals("/upload")) {
-                        sendMessage(chatId, "Отправьте фото для загрузки на Яндекс.Диск.");
-                    } else if (messageText.equals("/pending")) {
-                        handlePendingCommand(chatId);
-                    } else if (messageText.startsWith("/view ")) {
-                        handleViewCommand(chatId, messageText);
-                    } else if (messageText.startsWith("/edit ")) {
-                        handleEditCommandSimple(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/review ")) {
-                        handleReviewCommand(chatId, messageText);
-                    } else if (messageText.startsWith("/approve ")) {
-                        handleApproveCommand(chatId, moderatorId, messageText);
-                    } else if (messageText.startsWith("/reject ")) {
-                        handleRejectCommand(chatId, moderatorId, messageText);
                     } else {
                         // Проверяем, есть ли активное состояние поиска
                         if (searchStates.containsKey(chatId)) {
@@ -359,11 +339,11 @@ public class AdminBot extends TelegramLongPollingBot {
                             
                             if ("approved".equals(searchType)) {
                                 // НОВОЕ: Удаляем сообщение пользователя
-                                deleteUserMessage(chatId, userMessageId);
+                                deleteMessage(chatId, userMessageId);
                                 handleApprovedCommand(chatId, 0, messageText);
                             } else if ("admin_search".equals(searchType)) {
                                 // Удаляем сообщение пользователя
-                                deleteUserMessage(chatId, userMessageId);
+                                deleteMessage(chatId, userMessageId);
                                 List<Brand> brands = brandRepository.searchByName(messageText);
                                 if (brands.isEmpty()) {
                                     sendMessage(chatId, "❌ Брендов не найдено");
@@ -372,7 +352,7 @@ public class AdminBot extends TelegramLongPollingBot {
                                 }
                             } else if (searchType.startsWith("admin_search_models_")) {
                                 // Удаляем сообщение пользователя
-                                deleteUserMessage(chatId, userMessageId);
+                                deleteMessage(chatId, userMessageId);
                                 String brandName = searchType.substring(20);
                                 handleAdminSearchModelsInput(chatId, messageText, brandName);
                             } else if ("separator".equals(searchType)) {
@@ -500,18 +480,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleUploadCancelNo(chatId);
             } else if (data.equals("back_to_menu")) {
                 // Удаляем сообщение с кнопкой
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(callbackQuery.getMessage().getMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete message: " + e.getMessage());
-                }
-                
+                deleteMessage(chatId, callbackQuery.getMessage().getMessageId());
                 // Вызываем deleteRecentMessages для удаления всех отслеживаемых сообщений
                 deleteRecentMessages(chatId, null);
-                
                 // Очищаем состояния
                 moderationStates.remove(chatId);
                 searchStates.remove(chatId);
@@ -786,7 +757,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 adminPhotoSteps.remove(chatId);
                 
                 // Удаляем сообщение пользователя с фото
-                deleteUserMessage(chatId, update.getMessage().getMessageId());
+                deleteMessage(chatId, update.getMessage().getMessageId());
                 
                 // Скачиваем фото из Telegram
                 GetFile getFileMethod = new GetFile();
@@ -948,12 +919,7 @@ public class AdminBot extends TelegramLongPollingBot {
             
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Отмена")
-                .callbackData("approved_photo_cancel_" + knifeId)
-                .build());
-            keyboard.add(row);
+            keyboard.add(RowBuilder.getRow("❌ Отмена", "approved_photo_cancel_" + knifeId));
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
             
@@ -993,13 +959,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
                 List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-                
-                List<InlineKeyboardButton> row = new ArrayList<>();
-                row.add(InlineKeyboardButton.builder()
-                    .text("🔙 Главное меню")
-                    .callbackData("back_to_menu")
-                    .build());
-                keyboard.add(row);
+                keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
                 
                 markup.setKeyboard(keyboard);
                 message.setReplyMarkup(markup);
@@ -1088,14 +1048,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 keyboard.add(paginationRow);
             }
-            
-            // Кнопка возврата в меню
-            List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(menuRow);
+            keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -1165,12 +1118,7 @@ public class AdminBot extends TelegramLongPollingBot {
                     if (buttonText.length() > 15) {
                         buttonText = buttonText.substring(0, 12) + "...";
                     }
-                    
-                    currentRow.add(InlineKeyboardButton.builder()
-                        .text(buttonText)
-                        .callbackData("view_" + sub.getId())
-                        .build());
-                    
+                    RowBuilder.addRow(currentRow, buttonText, "view_" + sub.getId());
                     // Добавляем строку после 3 кнопок
                     if (currentRow.size() == 3) {
                         keyboard.add(currentRow);
@@ -1186,41 +1134,19 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Кнопки пагинации
                 if (totalPages > 1) {
                     List<InlineKeyboardButton> paginationRow = new ArrayList<>();
-                    
-                    if (page > 0) {
-                        paginationRow.add(InlineKeyboardButton.builder()
-                            .text("⬅️ Назад")
-                            .callbackData("pending_page_" + (page - 1))
-                            .build());
-                    }
-                    
-                    paginationRow.add(InlineKeyboardButton.builder()
-                        .text(String.format("%d/%d", page + 1, totalPages))
-                        .callbackData("pending_current_page")
-                        .build());
-                    
-                    if (page < totalPages - 1) {
-                        paginationRow.add(InlineKeyboardButton.builder()
-                            .text("Вперёд ➡️")
-                            .callbackData("pending_page_" + (page + 1))
-                            .build());
-                    }
-                    
+
+                    if (page > 0)
+                        RowBuilder.addRow(paginationRow, "⬅️ Назад", "pending_page_" + (page - 1));
+
+                    RowBuilder.addRow(paginationRow, String.format("%d/%d", page + 1, totalPages), "pending_current_page");
+                    RowBuilder.addRow(paginationRow, "Вперёд ➡️", "pending_page_" + (page + 1));
                     keyboard.add(paginationRow);
                 }
             }
-            
-            // Кнопка возврата в меню
-            List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(menuRow);
+            keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
             
             markup.setKeyboard(keyboard);
-            
-            // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Редактируем существующее сообщение вместо отправки нового
+
             org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText editMessage = 
                 new org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText();
             editMessage.setChatId(chatId.toString());
@@ -1232,7 +1158,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 execute(editMessage);
                 logger.info("Список ожидающих заявок обновлен (message ID: " + messages.getPendingListMessageId() + ")");
             } catch (org.telegram.telegrambots.meta.exceptions.TelegramApiException e) {
-                // Если не удалось отредактировать (сообщение удалено), отправляем новое
                 logger.warning("Не удалось отредактировать список, отправляем новый: " + e.getMessage());
                 handlePendingCommand(chatId);
             }
@@ -1326,12 +1251,8 @@ public class AdminBot extends TelegramLongPollingBot {
                 if (buttonText.length() > 15) {
                     buttonText = buttonText.substring(0, 12) + "...";
                 }
-                
-                currentRow.add(InlineKeyboardButton.builder()
-                    .text(buttonText)
-                    .callbackData("view_approved_" + knife.getId())
-                    .build());
-                
+                RowBuilder.addRow(currentRow, buttonText, "view_approved_" + knife.getId());
+
                 // Добавляем строку после 3 кнопок
                 if (currentRow.size() == 3) {
                     keyboard.add(currentRow);
@@ -1352,25 +1273,16 @@ public class AdminBot extends TelegramLongPollingBot {
                     String prevCallback = searchQuery != null 
                         ? "approved_page_" + (page - 1) + "_search_" + searchQuery
                         : "approved_page_" + (page - 1);
-                    paginationRow.add(InlineKeyboardButton.builder()
-                        .text("⬅️ Назад")
-                        .callbackData(prevCallback)
-                        .build());
+                    RowBuilder.addRow(paginationRow, "⬅️ Назад", prevCallback);
                 }
-                
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text(String.format("%d/%d", page + 1, totalPages))
-                    .callbackData("approved_current_page")
-                    .build());
-                
+
+                RowBuilder.addRow(paginationRow, String.format("%d/%d", page + 1, totalPages), "approved_current_page");
+
                 if (page < totalPages - 1) {
                     String nextCallback = searchQuery != null 
                         ? "approved_page_" + (page + 1) + "_search_" + searchQuery
                         : "approved_page_" + (page + 1);
-                    paginationRow.add(InlineKeyboardButton.builder()
-                        .text("Вперёд ➡️")
-                        .callbackData(nextCallback)
-                        .build());
+                    RowBuilder.addRow(paginationRow, "Вперёд ➡️", nextCallback);
                 }
                 
                 keyboard.add(paginationRow);
@@ -1378,25 +1290,16 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Кнопка поиска
             List<InlineKeyboardButton> searchRow = new ArrayList<>();
-            if (searchQuery != null) {
-                searchRow.add(InlineKeyboardButton.builder()
-                    .text("🔄 Сбросить поиск")
-                    .callbackData("approved_reset_search")
-                    .build());
-            } else {
-                searchRow.add(InlineKeyboardButton.builder()
-                    .text("🔍 Поиск")
-                    .callbackData("approved_search")
-                    .build());
-            }
+            if (searchQuery != null)
+                RowBuilder.addRow(searchRow, "🔄 Сбросить поиск", "approved_reset_search");
+            else
+                RowBuilder.addRow(searchRow, "🔍 Поиск", "approved_search");
+
             keyboard.add(searchRow);
             
             // Кнопка возврата в меню
             List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
+            RowBuilder.addRow(menuRow, "🔙 Главное меню", "back_to_menu");
             keyboard.add(menuRow);
             
             markup.setKeyboard(keyboard);
@@ -1407,214 +1310,6 @@ public class AdminBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             logger.severe("Ошибка при получении списка одобренных сертификатов: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при получении списка сертификатов");
-        }
-    }
-
-    private void handleViewCommand(Long chatId, String command) {
-        try {
-            String[] parts = command.split(" ");
-            if (parts.length < 2) {
-                sendMessage(chatId, "❌ Использование: /view <ID>");
-                return;
-            }
-            
-            Long submissionId = Long.parseLong(parts[1]);
-            Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-            
-            if (submissionOpt.isEmpty()) {
-                sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена");
-                return;
-            }
-            
-            SubmissionBuffer submission = submissionOpt.get();
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
-            
-            StringBuilder caption = new StringBuilder();
-            caption.append("📋 Заявка #").append(submission.getId()).append("\n\n");
-            caption.append("👤 Пользователь: @").append(submission.getUsername()).append("\n");
-            caption.append("🆔 User ID: ").append(submission.getUserId()).append("\n");
-            caption.append("📅 Дата: ").append(submission.getCreatedAt().format(formatter)).append("\n");
-            caption.append("📊 Статус: Ожидает рассмотрения").append("\n\n");
-            caption.append("🔪 Название: ").append(submission.getModelName() != null ? submission.getModelName() : "не указано").append("\n");
-            caption.append("🏷️ Бренд: ").append(submission.getBrandName() != null ? submission.getBrandName() : "не указан").append("\n");
-            caption.append("🔢 Индекс: ").append(submission.getIndex() != null ? submission.getIndex() : "не указан").append("\n\n");
-            
-            String altStr = submission.getAlternatives();
-            if (altStr != null && !altStr.isEmpty()) {
-                caption.append("🔄 Альтернативные модели:\n");
-                AlternativesParser parser = new AlternativesParserImpl("/");
-                for (var alt : parser.parse(altStr)) {
-                    caption.append("  • ").append(alt.name());
-                    if (alt.brand() != null) {
-                        caption.append(" / ").append(alt.brand());
-                    }
-                    caption.append("\n");
-                }
-            }
-            
-            String photoUrl = yandexDiskService.getDownloadUrl(submission.getPhotoPath());
-            
-            SendPhoto sendPhoto = new SendPhoto();
-            sendPhoto.setChatId(chatId.toString());
-            sendPhoto.setPhoto(new InputFile(photoUrl));
-            sendPhoto.setCaption(caption.toString());
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Одобрить")
-                .callbackData("approve_" + submissionId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Отклонить")
-                .callbackData("reject_" + submissionId)
-                .build());
-            
-            keyboard.add(row);
-            markup.setKeyboard(keyboard);
-            sendPhoto.setReplyMarkup(markup);
-            
-            Message sent = execute(sendPhoto);
-            ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
-            messages.setLastWindowMessageId(sent.getMessageId());
-            
-        } catch (NumberFormatException e) {
-            sendMessage(chatId, "❌ Неверный формат ID. Используйте: /view <ID>");
-        } catch (Exception e) {
-            logger.severe("Ошибка при просмотре заявки: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при просмотре заявки");
-        }
-    }
-
-    private void handleEditCommandSimple(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Редактирование через команды больше не поддерживается. Используйте кнопки в интерфейсе бота.");
-    }
-
-    private void handleEditCommand(Long chatId, Long moderatorId, String command) {
-        sendMessage(chatId, "⚠️ Web App редактор временно недоступен. Используйте кнопки для редактирования.");
-    }
-
-    private void handleReviewCommand(Long chatId, String command) {
-        try {
-            String[] parts = command.split(" ");
-            if (parts.length < 2) {
-                sendMessage(chatId, "❌ Использование: /review <ID>");
-                return;
-            }
-            
-            Long submissionId = Long.parseLong(parts[1]);
-            Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-            
-            if (submissionOpt.isEmpty()) {
-                sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена.");
-                return;
-            }
-            
-            SubmissionBuffer submission = submissionOpt.get();
-            sendSubmissionDetails(chatId, submission);
-            
-        } catch (NumberFormatException e) {
-            sendMessage(chatId, "❌ Неверный формат ID. Используйте: /review <ID>");
-        } catch (Exception e) {
-            logger.severe("Ошибка при просмотре заявки: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при просмотре заявки");
-        }
-    }
-
-    private void sendSubmissionDetails(Long chatId, SubmissionBuffer submission) {
-        try {
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
-            
-            StringBuilder message = new StringBuilder();
-            message.append("📄 Детали заявки #").append(submission.getId()).append("\n\n");
-            message.append("👤 Пользователь: @").append(submission.getUsername()).append("\n");
-            message.append("🆔 User ID: ").append(submission.getUserId()).append("\n");
-            
-            if (submission.getModelName() != null) {
-                message.append("🔪 Название: ").append(submission.getModelName()).append("\n");
-            } else {
-                message.append("🔪 Название: не указано\n");
-            }
-            
-            if (submission.getBrandName() != null) {
-                message.append("🏷️ Бренд: ").append(submission.getBrandName()).append("\n");
-            } else {
-                message.append("🏷️ Бренд: не указан\n");
-            }
-            
-            if (submission.getIndex() != null) {
-                message.append("🔢 Индекс: ").append(submission.getIndex()).append("\n");
-            } else {
-                message.append("🔢 Индекс: не указан\n");
-            }
-            
-            message.append("📅 Дата подачи: ").append(submission.getCreatedAt().format(formatter)).append("\n");
-            message.append("📊 Статус: Ожидает рассмотрения").append("\n");
-            
-            sendMessage(chatId, message.toString());
-            
-            try {
-                String photoUrl = yandexDiskService.getDownloadUrl(submission.getPhotoPath());
-                sendMessage(chatId, "🖼️ Фото: " + photoUrl);
-            } catch (Exception e) {
-                logger.warning("Не удалось получить URL фото: " + e.getMessage());
-                sendMessage(chatId, "⚠️ Не удалось загрузить фото. Путь: " + submission.getPhotoPath());
-            }
-            
-        } catch (Exception e) {
-            logger.severe("Ошибка при отправке деталей заявки: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при отображении деталей заявки.");
-        }
-    }
-
-    private void handleApproveCommand(Long chatId, Long moderatorId, String command) {
-        try {
-            String[] parts = command.split(" ");
-            if (parts.length < 2) {
-                sendMessage(chatId, "❌ Использование: /approve <ID>");
-                return;
-            }
-            
-            Long submissionId = Long.parseLong(parts[1]);
-            Knife knife = submissionBufferService.approveSubmission(submissionId);
-            
-            sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
-            
-        } catch (NumberFormatException e) {
-            sendMessage(chatId, "❌ Неверный формат ID. Используйте: /approve <ID>");
-        } catch (Exception e) {
-            logger.severe("Ошибка при одобрении заявки: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
-        }
-    }
-
-    private void handleRejectCommand(Long chatId, Long moderatorId, String command) {
-        try {
-            String[] parts = command.split(" ");
-            if (parts.length < 2) {
-                sendMessage(chatId, "❌ Использование: /reject <ID>");
-                return;
-            }
-            
-            Long submissionId = Long.parseLong(parts[1]);
-            
-            Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-            if (submissionOpt.isEmpty()) {
-                sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена");
-                return;
-            }
-            
-            submissionBufferService.rejectSubmission(submissionId);
-            
-            sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
-            
-        } catch (NumberFormatException e) {
-            sendMessage(chatId, "❌ Неверный формат ID. Используйте: /reject <ID>");
-        } catch (Exception e) {
-            logger.severe("Ошибка при отклонении заявки: " + e.getMessage());
-            sendMessage(chatId, "❌ Ошибка при отклонении заявки: " + e.getMessage());
         }
     }
 
@@ -1660,7 +1355,7 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("🔧 **Админ-панель**");
             message.setParseMode("Markdown");
-            
+
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
@@ -1672,12 +1367,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 if (displayName.length() > 15) {
                     displayName = displayName.substring(0, 12) + "...";
                 }
-                
-                currentRow.add(InlineKeyboardButton.builder()
-                    .text(displayName)
-                    .callbackData("admin_brand_" + brand.getName())
-                    .build());
-                
+                RowBuilder.addRow(currentRow, displayName, "admin_brand_" + brand.getName());
                 if (currentRow.size() == 3) {
                     keyboard.add(currentRow);
                     currentRow = new ArrayList<>();
@@ -1691,60 +1381,16 @@ public class AdminBot extends TelegramLongPollingBot {
             // Пагинация (если нужна)
             if (totalPages > 1) {
                 List<InlineKeyboardButton> paginationRow = new ArrayList<>();
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("⬅️")
-                    .callbackData("admin_main_page_" + (totalPages - 1))
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("1/" + totalPages)
-                    .callbackData("admin_main_current_page")
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("➡️")
-                    .callbackData("admin_main_page_1")
-                    .build());
+                RowBuilder.addRow(paginationRow, "⬅️", "admin_main_page_" + (totalPages - 1));
+                RowBuilder.addRow(paginationRow, "1/" + totalPages, "admin_main_current_page");
+                RowBuilder.addRow(paginationRow, "➡️", "admin_main_page_1");
                 keyboard.add(paginationRow);
             }
-            
-            // Кнопка поиска
-            List<InlineKeyboardButton> searchRow = new ArrayList<>();
-            searchRow.add(InlineKeyboardButton.builder()
-                .text("🔍 Поиск")
-                .callbackData("menu_search")
-                .build());
-            keyboard.add(searchRow);
-            
-            // Кнопка загрузки
-            List<InlineKeyboardButton> uploadRow = new ArrayList<>();
-            uploadRow.add(InlineKeyboardButton.builder()
-                .text("📤 Загрузить")
-                .callbackData("menu_upload")
-                .build());
-            keyboard.add(uploadRow);
-            
-            // Кнопка ожидающих заявок
-            List<InlineKeyboardButton> pendingRow = new ArrayList<>();
-            pendingRow.add(InlineKeyboardButton.builder()
-                .text("📋 Ожидающие заявки")
-                .callbackData("menu_pending")
-                .build());
-            keyboard.add(pendingRow);
-            
-            // Кнопка журнала ошибок
-            List<InlineKeyboardButton> errorLogRow = new ArrayList<>();
-            errorLogRow.add(InlineKeyboardButton.builder()
-                .text("📋 Журнал ошибок")
-                .callbackData("menu_error_log")
-                .build());
-            keyboard.add(errorLogRow);
-            
-            // Кнопка настроек
-            List<InlineKeyboardButton> settingsRow = new ArrayList<>();
-            settingsRow.add(InlineKeyboardButton.builder()
-                .text("⚙️ Настройки")
-                .callbackData("menu_settings")
-                .build());
-            keyboard.add(settingsRow);
+            keyboard.add(RowBuilder.getRow("🔍 Поиск", "menu_search"));
+            keyboard.add(RowBuilder.getRow("📤 Загрузить","menu_upload"));
+            keyboard.add(RowBuilder.getRow("📋 Ожидающие заявки", "menu_pending"));
+            keyboard.add(RowBuilder.getRow("📋 Журнал ошибок", "menu_error_log"));
+            keyboard.add(RowBuilder.getRow("⚙️ Настройки", "menu_settings"));
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -1755,6 +1401,7 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Устанавливаем главное меню на уровень 0 стека
             navigationStackService.setLevel(chatId, 0, sent.getMessageId());
+            userMainMenuRepository.save(new UserMainMenu(chatId, sent.getMessageId()));
         } catch (Exception e) {
             logger.severe("Error sending admin menu: " + e.getMessage());
         }
@@ -1777,21 +1424,13 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("⚠️ У вас есть несохраненные изменения в текущей заявке.\n\n" +
                     "Закрыть текущую заявку без сохранения?");
-            
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             List<InlineKeyboardButton> row = new ArrayList<>();
-            InlineKeyboardButton yesBtn = new InlineKeyboardButton();
-            yesBtn.setText("✅ Да, закрыть");
-            yesBtn.setCallbackData("switch_confirm_yes_" + submissionId);
-            row.add(yesBtn);
-            
-            InlineKeyboardButton noBtn = new InlineKeyboardButton();
-            noBtn.setText("❌ Нет");
-            noBtn.setCallbackData("switch_confirm_no");
-            row.add(noBtn);
-            
+            RowBuilder.addRow(row, "✅ Да, закрыть", "switch_confirm_yes_" + submissionId);
+            RowBuilder.addRow(row, "❌ Нет", "switch_confirm_no");
+
             keyboard.add(row);
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -1913,41 +1552,24 @@ public class AdminBot extends TelegramLongPollingBot {
     private InlineKeyboardMarkup buildModFormKeyboard(ModerationState state, Long submissionId, SubmissionBuffer submission) {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        
         // Блок 1: Кнопки полей (показывают текущие значения)
-        
         // Кнопка "Бренд"
-        List<InlineKeyboardButton> row1 = new ArrayList<>();
-        String brandText = state.getBrand() != null ? 
+        String brandText = state.getBrand() != null ?
             "🏷️ " + (state.getBrand().length() > 25 ? state.getBrand().substring(0, 22) + "..." : state.getBrand()) : 
             "🏷️ Бренд";
-        row1.add(InlineKeyboardButton.builder()
-            .text(brandText)
-            .callbackData("mod_edit_brand_" + submissionId)
-            .build());
-        keyboard.add(row1);
+        keyboard.add(RowBuilder.getRow(brandText, "mod_edit_brand_" + submissionId));
         
         // Кнопка "Название"
-        List<InlineKeyboardButton> row2 = new ArrayList<>();
-        String nameText = state.getName() != null ? 
+        String nameText = state.getName() != null ?
             "📝 " + (state.getName().length() > 25 ? state.getName().substring(0, 22) + "..." : state.getName()) : 
             "📝 Название";
-        row2.add(InlineKeyboardButton.builder()
-            .text(nameText)
-            .callbackData("mod_edit_name_" + submissionId)
-            .build());
-        keyboard.add(row2);
+        keyboard.add(RowBuilder.getRow(nameText, "mod_edit_name_" + submissionId));
         
         // Кнопка "Индекс"
-        List<InlineKeyboardButton> row3 = new ArrayList<>();
-        String indexText = state.getIndexCode() != null ? 
+        String indexText = state.getIndexCode() != null ?
             "🔢 " + state.getIndexCode() : 
             "🔢 Индекс";
-        row3.add(InlineKeyboardButton.builder()
-            .text(indexText)
-            .callbackData("mod_edit_index_" + submissionId)
-            .build());
-        keyboard.add(row3);
+        keyboard.add(RowBuilder.getRow(indexText, "mod_edit_index_" + submissionId));
         
         // Блок 2: Альтернативы
         
@@ -1960,18 +1582,12 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Разделитель альтернатив
         if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
-            List<InlineKeyboardButton> separatorRow = new ArrayList<>();
-            separatorRow.add(InlineKeyboardButton.builder()
-                .text("──── Альтернативы ────")
-                .callbackData("alt_separator")
-                .build());
-            keyboard.add(separatorRow);
+            keyboard.add(RowBuilder.getRow("──── Альтернативы ────", "alt_separator"));
             
             // Список альтернатив с кнопками удаления и идентификаторами
             for (int i = 0; i < state.getAlternativeModels().size(); i++) {
                 String altStr = state.getAlternativeModels().get(i);
-                List<InlineKeyboardButton> altRow = new ArrayList<>();
-                
+
                 // Проверяем, есть ли эта альтернатива в базе с сертификатом
                 boolean hasCertificate = false;
                 for (Knife alt : dbAlternatives) {
@@ -1984,21 +1600,12 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 String altText = altStr.length() > 35 ? altStr.substring(0, 32) + "..." : altStr;
                 String prefix = hasCertificate ? "✅ " : "❌ ";
-                altRow.add(InlineKeyboardButton.builder()
-                    .text(prefix + altText)
-                    .callbackData("mod_remove_alt_" + i + "_" + submissionId)
-                    .build());
-                keyboard.add(altRow);
+                keyboard.add(RowBuilder.getRow(prefix + altText, "mod_remove_alt_" + i + "_" + submissionId));
             }
         }
         
         // Кнопка добавления альтернативы
-        List<InlineKeyboardButton> addAltRow = new ArrayList<>();
-        addAltRow.add(InlineKeyboardButton.builder()
-            .text("➕ Добавить альтернативу")
-            .callbackData("mod_add_alt_" + submissionId)
-            .build());
-        keyboard.add(addAltRow);
+        keyboard.add(RowBuilder.getRow("➕ Добавить альтернативу", "mod_add_alt_" + submissionId));
         
         // Пустая строка-разделитель
         keyboard.add(new ArrayList<>());
@@ -2006,33 +1613,16 @@ public class AdminBot extends TelegramLongPollingBot {
         // Блок 3: Действия модератора
         
         List<InlineKeyboardButton> actionRow = new ArrayList<>();
-        actionRow.add(InlineKeyboardButton.builder()
-            .text("✅ Одобрить")
-            .callbackData("mod_approve_" + submissionId)
-            .build());
-        actionRow.add(InlineKeyboardButton.builder()
-            .text("❌ Отклонить")
-            .callbackData("mod_reject_" + submissionId)
-            .build());
+        RowBuilder.addRow(actionRow, "✅ Одобрить", "mod_approve_" + submissionId);
+        RowBuilder.addRow(actionRow, "❌ Отклонить", "mod_reject_" + submissionId);
         keyboard.add(actionRow);
         
         // Кнопка "Сохранить и выйти" — только если есть изменения
-        if (state.hasChanges()) {
-            List<InlineKeyboardButton> saveRow = new ArrayList<>();
-            saveRow.add(InlineKeyboardButton.builder()
-                .text("💾 Сохранить и выйти")
-                .callbackData("mod_save_exit_" + submissionId)
-                .build());
-            keyboard.add(saveRow);
-        }
+        if (state.hasChanges())
+            keyboard.add(RowBuilder.getRow("💾 Сохранить и выйти", "mod_save_exit_" + submissionId));
         
         // Кнопка отмены
-        List<InlineKeyboardButton> cancelRow = new ArrayList<>();
-        cancelRow.add(InlineKeyboardButton.builder()
-            .text("🔙 Назад к списку")
-            .callbackData("mod_cancel_" + submissionId)
-            .build());
-        keyboard.add(cancelRow);
+        keyboard.add(RowBuilder.getRow("🔙 Назад к списку", "mod_cancel_" + submissionId));
         
         markup.setKeyboard(keyboard);
         return markup;
@@ -2042,18 +1632,8 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             // Проверяем, есть ли уже открытая форма
             ModerationState existingState = moderationStates.get(chatId);
-            if (existingState != null && existingState.getFormMessageId() != null) {
-                // Удаляем только предыдущую форму заявки, не трогая список
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(existingState.getFormMessageId());
-                    execute(deleteMsg);
-                    logger.info("Deleted previous form message: " + existingState.getFormMessageId());
-                } catch (Exception e) {
-                    logger.info("Failed to delete previous form: " + e.getMessage());
-                }
-            }
+            if (existingState != null && existingState.getFormMessageId() != null)
+                deleteMessage(chatId, existingState.getFormMessageId());
             
             Optional<Knife> knifeOpt = knifeService.getKnifeById(submissionId);
             
@@ -2087,11 +1667,8 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Формируем текст с информацией о сертификате
             StringBuilder caption = new StringBuilder();
-            caption.append("✅ Одобренный сертификат\n\n");
-            
-            caption.append("ID: #").append(knife.getId()).append("\n");
-            caption.append("Статус: Одобрен\n");
-            
+            caption.append("Сертификат #").append(knife.getId()).append("\n");
+
             // Отправляем фото с подписью (если есть)
             if (knife.getPhotoPath() != null && !knife.getPhotoPath().isEmpty()) {
                 try {
@@ -2111,7 +1688,7 @@ public class AdminBot extends TelegramLongPollingBot {
                     logger.warning("Не удалось загрузить фото: " + e.getMessage());
                     SendMessage textMessage = new SendMessage();
                     textMessage.setChatId(chatId.toString());
-                    textMessage.setText(caption.toString() + "\n\n⚠️ Не удалось загрузить фото");
+                    textMessage.setText(caption + "\n\n⚠️ Не удалось загрузить фото");
                     textMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
                     
                     Message sentMessage = execute(textMessage);
@@ -2123,7 +1700,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Если фото нет, отправляем только текст
                 SendMessage textMessage = new SendMessage();
                 textMessage.setChatId(chatId.toString());
-                textMessage.setText(caption.toString() + "\n\n⚠️ Фото отсутствует");
+                textMessage.setText(caption + "\n\n⚠️ Фото отсутствует");
                 textMessage.setReplyMarkup(buildApprovedFormKeyboard(submissionId, state));
                 
                 Message sentMessage = execute(textMessage);
@@ -2151,102 +1728,49 @@ public class AdminBot extends TelegramLongPollingBot {
             if (photoPathText.length() > 40) {
                 photoPathText = "..." + photoPathText.substring(photoPathText.length() - 37);
             }
-            photoRow.add(InlineKeyboardButton.builder()
-                .text("📷 " + photoPathText)
-                .callbackData("approved_photo_" + submissionId)
-                .build());
-        } else {
-            photoRow.add(InlineKeyboardButton.builder()
-                .text("📷 Установить фото сертификата")
-                .callbackData("approved_photo_" + submissionId)
-                .build());
-        }
+            RowBuilder.addRow(photoRow, "📷 " + photoPathText, "approved_photo_" + submissionId);
+        } else
+            RowBuilder.addRow(photoRow, "📷 Установить фото сертификата", "approved_photo_" + submissionId);
         keyboard.add(photoRow);
         
         // Кнопка названия
         String nameText = "🔪 Название: " + (state.getName() != null ? state.getName() : "не указано");
-        List<InlineKeyboardButton> row1 = new ArrayList<>();
-        row1.add(InlineKeyboardButton.builder()
-            .text(nameText)
-            .callbackData("mod_edit_name_" + submissionId)
-            .build());
-        keyboard.add(row1);
+        keyboard.add(RowBuilder.getRow(nameText, "mod_edit_name_" + submissionId));
         
         // Кнопка бренда
         String brandText = "🏷️ Бренд: " + (state.getBrand() != null ? state.getBrand() : "не указан");
-        List<InlineKeyboardButton> row2 = new ArrayList<>();
-        row2.add(InlineKeyboardButton.builder()
-            .text(brandText)
-            .callbackData("mod_edit_brand_" + submissionId)
-            .build());
-        keyboard.add(row2);
+        keyboard.add(RowBuilder.getRow(brandText, "mod_edit_brand_" + submissionId));
         
         // Кнопка индекса
         String indexText = "🔢 Индекс: " + (state.getIndexCode() != null ? state.getIndexCode() : "не указан");
-        List<InlineKeyboardButton> row3 = new ArrayList<>();
-        row3.add(InlineKeyboardButton.builder()
-            .text(indexText)
-            .callbackData("mod_edit_index_" + submissionId)
-            .build());
-        keyboard.add(row3);
+        keyboard.add(RowBuilder.getRow(indexText, "mod_edit_index_" + submissionId));
         
         // Кнопка альтернативных моделей
         List<String> altModels = state.getAlternativeModels();
         String altText = "🔄 Альтернативные: " + (altModels != null && !altModels.isEmpty() ? altModels.size() + " шт." : "нет");
-        List<InlineKeyboardButton> row4 = new ArrayList<>();
-        row4.add(InlineKeyboardButton.builder()
-            .text(altText)
-            .callbackData("mod_edit_alt_" + submissionId)
-            .build());
-        keyboard.add(row4);
+        keyboard.add(RowBuilder.getRow(altText, "mod_edit_alt_" + submissionId));
         
-        // Кнопка сохранения — только если есть изменения (Req 11.7)
-        if (state.hasChanges()) {
-            List<InlineKeyboardButton> row5 = new ArrayList<>();
-            row5.add(InlineKeyboardButton.builder()
-                .text("💾 Сохранить изменения")
-                .callbackData("approved_save_" + submissionId)
-                .build());
-            keyboard.add(row5);
-        }
+        // Кнопка сохранения — только если есть изменения
+        if (state.hasChanges())
+            keyboard.add(RowBuilder.getRow("💾 Сохранить изменения", "approved_save_" + submissionId));
         
-        List<InlineKeyboardButton> row6 = new ArrayList<>();
-        row6.add(InlineKeyboardButton.builder()
-            .text("🗑️ Удалить сертификат")
-            .callbackData("approved_delete_" + submissionId)
-            .build());
-        keyboard.add(row6);
-        
-        // Кнопка отмены
-        List<InlineKeyboardButton> row7 = new ArrayList<>();
-        row7.add(InlineKeyboardButton.builder()
-            .text("❌ Закрыть")
-            .callbackData("approved_cancel_" + submissionId)
-            .build());
-        keyboard.add(row7);
+        keyboard.add(RowBuilder.getRow("🗑️ Удалить сертификат", "approved_delete_" + submissionId));
+        keyboard.add(RowBuilder.getRow("❌ Закрыть", "approved_cancel_" + submissionId));
         
         markup.setKeyboard(keyboard);
         return markup;
     }
     
     /**
-     * Показывает форму добавления сертификата после загрузки фото (Req 15.2).
+     * Показывает форму добавления сертификата после загрузки фото.
      * Запрашивает у пользователя: бренд, название, индекс, альтернативы.
      */
     private void sendUploadForm(Long chatId, ModerationState state) {
         try {
             // Удаляем предыдущее сообщение-запрос, если оно существует
-            if (state.getPromptMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getPromptMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete prompt: " + e.getMessage());
-                }
-            }
-            
+            if (state.getPromptMessageId() != null)
+                deleteMessage(chatId, state.getPromptMessageId());
+
             // Формируем текст с инструкциями
             StringBuilder text = new StringBuilder();
             text.append("📝 Форма добавления сертификата\n\n");
@@ -2267,53 +1791,22 @@ public class AdminBot extends TelegramLongPollingBot {
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             // Кнопки для редактирования
-            List<InlineKeyboardButton> brandRow = new ArrayList<>();
-            brandRow.add(InlineKeyboardButton.builder()
-                .text("🏷️ Бренд: " + (state.getBrand() != null ? state.getBrand() : "не указан"))
-                .callbackData("upload_edit_brand")
-                .build());
-            keyboard.add(brandRow);
-            
-            List<InlineKeyboardButton> nameRow = new ArrayList<>();
-            nameRow.add(InlineKeyboardButton.builder()
-                .text("📝 Название: " + (state.getName() != null ? state.getName() : "не указано"))
-                .callbackData("upload_edit_name")
-                .build());
-            keyboard.add(nameRow);
-            
-            List<InlineKeyboardButton> indexRow = new ArrayList<>();
-            indexRow.add(InlineKeyboardButton.builder()
-                .text("🔢 Индекс: " + (state.getIndexCode() != null ? state.getIndexCode() : "не указан"))
-                .callbackData("upload_edit_index")
-                .build());
-            keyboard.add(indexRow);
-            
-            List<InlineKeyboardButton> altRow = new ArrayList<>();
-            altRow.add(InlineKeyboardButton.builder()
-                .text("🔄 Альтернативы: " + (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty() 
-                    ? state.getAlternativeModels().size() + " шт." : "нет"))
-                .callbackData("upload_edit_alt")
-                .build());
-            keyboard.add(altRow);
+            keyboard.add(RowBuilder.getRow("🏷️ Бренд: "
+                    + (state.getBrand() != null ? state.getBrand() : "не указан"), "upload_edit_brand"));
+            keyboard.add(RowBuilder.getRow("📝 Название: "
+                    + (state.getName() != null ? state.getName() : "не указано"), "upload_edit_name"));
+            keyboard.add(RowBuilder.getRow("🔢 Индекс: "
+                    + (state.getIndexCode() != null ? state.getIndexCode() : "не указан"), "upload_edit_index"));
+            keyboard.add(RowBuilder.getRow("🔄 Альтернативы: "
+                    + (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()
+                    ? state.getAlternativeModels().size() + " шт." : "нет"), "upload_edit_alt"));
             
             // Кнопки действий
             List<InlineKeyboardButton> actionRow = new ArrayList<>();
-            actionRow.add(InlineKeyboardButton.builder()
-                .text("💾 Сохранить")
-                .callbackData("upload_save")
-                .build());
-            actionRow.add(InlineKeyboardButton.builder()
-                .text("✅ Добавить")
-                .callbackData("upload_add")
-                .build());
+            RowBuilder.addRow(actionRow, "💾 Сохранить", "upload_save");
+            RowBuilder.addRow(actionRow, "✅ Добавить", "upload_add");
             keyboard.add(actionRow);
-            
-            List<InlineKeyboardButton> cancelRow = new ArrayList<>();
-            cancelRow.add(InlineKeyboardButton.builder()
-                .text("❌ Закрыть")
-                .callbackData("upload_cancel")
-                .build());
-            keyboard.add(cancelRow);
+            keyboard.add(RowBuilder.getRow("❌ Закрыть", "upload_cancel"));
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
@@ -2339,18 +1832,9 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // НОВОЕ: Удаляем предыдущее сообщение-запрос, если оно существует
-        if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-                logger.info("Deleted previous prompt message: " + state.getPromptMessageId());
-            } catch (Exception e) {
-                logger.warning("Failed to delete previous prompt: " + e.getMessage());
-            }
-        }
-        
+        if (state.getPromptMessageId() != null)
+            deleteMessage(chatId, state.getPromptMessageId());
+
         state.setEditingField(field);
         
         String prompt = "";
@@ -2405,7 +1889,7 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // Удаляем сообщение пользователя
-        deleteUserMessage(chatId, userMessageId);
+        deleteMessage(chatId, userMessageId);
         
         String field = state.getEditingField();
         
@@ -2438,14 +1922,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем сообщение-запрос
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt message: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
         }
         
@@ -2462,14 +1939,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем предыдущее сообщение-запрос, если оно есть
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt message: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
         }
         
@@ -2482,16 +1952,8 @@ public class AdminBot extends TelegramLongPollingBot {
                 "Можно ввести несколько через запятую:\nБренд1 / Название1, Бренд2 / Название2");
             
             // Добавляем кнопку "Отмена"
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Отмена")
-                .callbackData("mod_cancel_input_" + submissionId)
-                .build());
-            keyboard.add(row);
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
+            message.setReplyMarkup(new InlineKeyboardMarkup(
+                    List.of(RowBuilder.getRow("❌ Отмена", "mod_cancel_input_" + submissionId))));
             
             Message sent = execute(message);
             state.setPromptMessageId(sent.getMessageId());
@@ -2524,14 +1986,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем сообщение-запрос
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt message: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
         }
         
@@ -2559,11 +2014,9 @@ public class AdminBot extends TelegramLongPollingBot {
         if (!errors.isEmpty()) {
             StringBuilder message = new StringBuilder();
             message.append("⚠️ Невозможно одобрить заявку:\n\n");
-            for (String error : errors) {
+            for (String error : errors)
                 message.append(error).append("\n");
-            }
             message.append("\n📝 Заполните все обязательные поля.");
-            
             sendMessage(chatId, message.toString());
             return;
         }
@@ -2571,14 +2024,14 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             // Применяем изменения к заявке
             SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
-            
+
             // Обновляем поля заявки (теперь гарантированно не null)
             submission.setModelName(state.getName().trim());
-            submission.setBrandName(state.getBrand() != null && !state.getBrand().trim().isEmpty() 
-                ? state.getBrand().trim() 
+            submission.setBrandName(state.getBrand() != null && !state.getBrand().trim().isEmpty()
+                ? state.getBrand().trim()
                 : null);
             submission.setIndex(state.getIndexCode().trim());
-            
+
             // Обновляем альтернативы (теперь как TEXT поле)
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
                 StringBuilder altStr = new StringBuilder();
@@ -2590,7 +2043,7 @@ public class AdminBot extends TelegramLongPollingBot {
             } else {
                 submission.setAlternatives(null);
             }
-            
+
             // Проверяем наличие дубликата (нож с совпадающими brand+name+index)
             Optional<Knife> duplicateKnife = submissionBufferService.findDuplicateKnife(
                 submission.getBrandName(),
@@ -2607,25 +2060,14 @@ public class AdminBot extends TelegramLongPollingBot {
                         "🔪 " + existingKnife.getDisplayName() + "\n\n" +
                         "Хотите обновить фото существующего ножа вместо создания дубликата?";
                 
-                InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup();
-                List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-                
                 List<InlineKeyboardButton> row = new ArrayList<>();
-                row.add(InlineKeyboardButton.builder()
-                    .text("✅ Обновить фото")
-                    .callbackData("mod_replace_photo_yes_" + submissionId)
-                    .build());
-                row.add(InlineKeyboardButton.builder()
-                    .text("❌ Создать новый")
-                    .callbackData("mod_replace_photo_no_" + submissionId)
-                    .build());
-                rows.add(row);
-                keyboard.setKeyboard(rows);
-                
+                RowBuilder.addRow(row, "✅ Обновить фото", "mod_replace_photo_yes_" + submissionId);
+                RowBuilder.addRow(row, "❌ Создать новый", "mod_replace_photo_no_" + submissionId);
+
                 SendMessage msg = new SendMessage();
                 msg.setChatId(chatId.toString());
                 msg.setText(duplicateMessage);
-                msg.setReplyMarkup(keyboard);
+                msg.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
                 
                 Message sentMsg = executeAndTrack(msg);
                 state.setDuplicateMessageId(sentMsg.getMessageId());
@@ -2649,40 +2091,24 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
         }
     }
-    
+
     /**
      * Показывает сообщение-подтверждение со списком pending-альтернатив.
-     * Требование 8.1: отобразить список pending-альтернатив с кнопками [✅ Да, завершить] и [❌ Отмена].
      */
     private void showAltConfirmation(Long chatId, Long submissionId, List<String> pendingAlts, ModerationState state) {
         try {
             StringBuilder text = new StringBuilder();
             text.append("🔄 Найдены новые альтернативы:\n");
-            for (String alt : pendingAlts) {
+            for (String alt : pendingAlts)
                 text.append("• ").append(alt).append("\n");
-            }
             text.append("\nЗавершить добавление?");
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-            
             List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Да, завершить")
-                .callbackData("alt_confirm_yes_" + submissionId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Отмена")
-                .callbackData("alt_confirm_no_" + submissionId)
-                .build());
-            rows.add(row);
-            markup.setKeyboard(rows);
-            
+            RowBuilder.addRow(row, "✅ Да, завершить", "alt_confirm_yes_" + submissionId);
+            RowBuilder.addRow(row, "❌ Отмена", "alt_confirm_no_" + submissionId);
             SendMessage msg = new SendMessage();
             msg.setChatId(chatId.toString());
             msg.setText(text.toString());
-            msg.setReplyMarkup(markup);
-            
+            msg.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             Message sentMsg = execute(msg);
             state.setConfirmationMessageId(sentMsg.getMessageId());
             
@@ -2705,14 +2131,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем сообщение-подтверждение (Req 14.8)
         if (state.getConfirmationMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getConfirmationMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete confirmation message: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getConfirmationMessageId());
             state.setConfirmationMessageId(null);
         }
         
@@ -2722,7 +2141,6 @@ public class AdminBot extends TelegramLongPollingBot {
     
     /**
      * Обработчик отмены одобрения — [❌ Отмена].
-     * Требование 8.4: отменить одобрение, вернуть форму модерации без изменений в БД.
      */
     private void handleAltConfirmNo(Long chatId, Long submissionId) {
         ModerationState state = moderationStates.get(chatId);
@@ -2733,14 +2151,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем сообщение-подтверждение (Req 14.8)
         if (state.getConfirmationMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getConfirmationMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete confirmation message: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getConfirmationMessageId());
             state.setConfirmationMessageId(null);
         }
         
@@ -2765,31 +2176,15 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Удаляем сообщение с предложением
-            if (state.getDuplicateMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getDuplicateMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete duplicate message: " + e.getMessage());
-                }
-            }
+            if (state.getDuplicateMessageId() != null)
+                deleteMessage(chatId, state.getDuplicateMessageId());
             
             // Заменяем фото существующего ножа
             submissionBufferService.replaceKnifePhoto(duplicateKnifeId, submission.getPhotoPath());
             
             // Удаляем форму
-            if (state.getFormMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getFormMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete form: " + e.getMessage());
-                }
-            }
+            if (state.getFormMessageId() != null)
+                deleteMessage(chatId, state.getFormMessageId());
             
             // Удаляем заявку из буфера
             submissionBufferService.rejectSubmission(submissionId);
@@ -2819,27 +2214,15 @@ public class AdminBot extends TelegramLongPollingBot {
         
         try {
             SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
-            
             // Удаляем сообщение с предложением
-            if (state.getDuplicateMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getDuplicateMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete duplicate message: " + e.getMessage());
-                }
-            }
-            
+            if (state.getDuplicateMessageId() != null)
+                deleteMessage(chatId, state.getDuplicateMessageId());
             // Продолжаем одобрение — проверяем наличие pending-альтернатив
             List<String> pendingAlts = state.getAlternativeModels();
-            if (pendingAlts != null && !pendingAlts.isEmpty()) {
+            if (pendingAlts != null && !pendingAlts.isEmpty())
                 showAltConfirmation(chatId, submissionId, pendingAlts, state);
-            } else {
+            else
                 approveSubmissionInternal(chatId, submissionId, submission, state);
-            }
-            
         } catch (Exception e) {
             logger.severe("Ошибка при одобрении: " + e.getMessage());
             logError("Одобрение заявки #" + submissionId, e.getMessage());
@@ -2854,29 +2237,13 @@ public class AdminBot extends TelegramLongPollingBot {
             Knife knife = submissionBufferService.approveSubmission(submissionId);
             
             // Удаляем форму
-            if (state.getFormMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getFormMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete form: " + e.getMessage());
-                }
-            }
+            if (state.getFormMessageId() != null)
+                deleteMessage(chatId, state.getFormMessageId());
             
             // Удаляем сообщение-запрос, если оно есть
-            if (state.getPromptMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getPromptMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete prompt: " + e.getMessage());
-                }
-            }
-            
+            if (state.getPromptMessageId() != null)
+                deleteMessage(chatId, state.getPromptMessageId());
+
             // Ищем транзитивные альтернативы (Req 9.1–9.5)
             Set<Long> newAlternativeIds = knife.getAlternatives().stream()
                 .map(Knife::getId)
@@ -2913,7 +2280,6 @@ public class AdminBot extends TelegramLongPollingBot {
     
     /**
      * Показывает предложение добавить транзитивные альтернативы после одобрения заявки.
-     * Требование 9.2: отобразить список транзитивных альтернатив с кнопками [✅ Да] и [❌ Нет].
      */
     private void showTransitiveAlternativesProposalForPending(Long chatId, Long knifeId,
                                                                Set<Knife> transitiveAlternatives,
@@ -2931,33 +2297,19 @@ public class AdminBot extends TelegramLongPollingBot {
                 message.append("• ").append(knife.getDisplayName()).append("\n");
                 count++;
             }
-            
             message.append("\n❓ Добавить прямые связи с этими альтернативами?");
             
             SendMessage sendMessage = new SendMessage();
             sendMessage.setChatId(chatId.toString());
             sendMessage.setText(message.toString());
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
             List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Да")
-                .callbackData("transitive_pending_yes_" + knifeId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Нет")
-                .callbackData("transitive_pending_no_" + knifeId)
-                .build());
-            keyboard.add(row);
-            
-            markup.setKeyboard(keyboard);
-            sendMessage.setReplyMarkup(markup);
+            RowBuilder.addRow(row, "✅ Да", "transitive_pending_yes_" + knifeId);
+            RowBuilder.addRow(row, "❌ Нет", "transitive_pending_no_" + knifeId);
+            sendMessage.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             
             Message sent = execute(sendMessage);
             state.setTransitiveMessageId(sent.getMessageId());
-            
         } catch (Exception e) {
             logger.severe("Error showing transitive alternatives proposal for pending: " + e.getMessage());
             // Если не удалось показать предложение — просто завершаем
@@ -2968,7 +2320,6 @@ public class AdminBot extends TelegramLongPollingBot {
     
     /**
      * Обработчик [✅ Да] для транзитивных альтернатив после одобрения заявки.
-     * Требование 9.3: создать прямые связи между одобренным сертификатом и всеми транзитивными альтернативами.
      */
     private void handleTransitivePendingYes(Long chatId, Long knifeId) {
         try {
@@ -3024,7 +2375,6 @@ public class AdminBot extends TelegramLongPollingBot {
     
     /**
      * Обработчик [❌ Нет] для транзитивных альтернатив после одобрения заявки.
-     * Требование 9.4: пропустить добавление транзитивных альтернатив и продолжить.
      */
     private void handleTransitivePendingNo(Long chatId, Long knifeId) {
         try {
@@ -3051,28 +2401,15 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("⚠️ Вы уверены, что хотите отклонить заявку #" + submissionId + "?");
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
             List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Да, отклонить")
-                .callbackData("confirm_reject_" + submissionId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Отмена")
-                .callbackData("cancel_reject_" + submissionId)
-                .build());
-            keyboard.add(row);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
+            RowBuilder.addRow(row, "✅ Да, отклонить", "confirm_reject_" + submissionId);
+            RowBuilder.addRow(row, "❌ Отмена", "cancel_reject_" + submissionId);
+            message.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             
             Message sent = execute(message);
             
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
             messages.addOtherMessageId(sent.getMessageId());
-            
         } catch (Exception e) {
             logger.severe("Error sending reject confirmation: " + e.getMessage());
         }
@@ -3082,16 +2419,8 @@ public class AdminBot extends TelegramLongPollingBot {
         // Удаляем только сообщение подтверждения
         ChatMessages messages = chatMessages.get(chatId);
         if (messages != null) {
-            for (Integer msgId : messages.getOtherMessageIds()) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(msgId);
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    // Игнорируем
-                }
-            }
+            for (Integer msgId : messages.getOtherMessageIds())
+                deleteMessage(chatId, msgId);
             messages.clearOtherMessages();
         }
     }
@@ -3110,45 +2439,20 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionBufferService.rejectSubmission(submissionId);
             
             // Удаляем форму
-            if (state != null && state.getFormMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getFormMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete form: " + e.getMessage());
-                }
-            }
+            if (state != null && state.getFormMessageId() != null)
+                deleteMessage(chatId, state.getFormMessageId());
             
             // Удаляем сообщение-запрос, если оно есть
-            if (state != null && state.getPromptMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getPromptMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete prompt: " + e.getMessage());
-                }
-            }
-            
+            if (state != null && state.getPromptMessageId() != null)
+                deleteMessage(chatId, state.getPromptMessageId());
+
             // Удаляем сообщение подтверждения отклонения, если оно есть
             ChatMessages messages = chatMessages.get(chatId);
             if (messages != null) {
-                for (Integer msgId : messages.getOtherMessageIds()) {
-                    try {
-                        DeleteMessage deleteMsg = new DeleteMessage();
-                        deleteMsg.setChatId(chatId.toString());
-                        deleteMsg.setMessageId(msgId);
-                        execute(deleteMsg);
-                    } catch (Exception e) {
-                        // Игнорируем
-                    }
-                }
+                for (Integer msgId : messages.getOtherMessageIds())
+                    deleteMessage(chatId, msgId);
                 messages.clearOtherMessages();
             }
-            
             // Очищаем состояние
             moderationStates.remove(chatId);
             
@@ -3177,23 +2481,11 @@ public class AdminBot extends TelegramLongPollingBot {
                 SendMessage message = new SendMessage();
                 message.setChatId(chatId.toString());
                 message.setText("⚠️ Вы внесли изменения в заявку.\n\nОтменить изменения и вернуться к списку?");
-                
-                InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-                List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-                
+
                 List<InlineKeyboardButton> row = new ArrayList<>();
-                row.add(InlineKeyboardButton.builder()
-                    .text("✅ Да, отменить")
-                    .callbackData("mod_cancel_confirm_" + submissionId)
-                    .build());
-                row.add(InlineKeyboardButton.builder()
-                    .text("❌ Нет, продолжить")
-                    .callbackData("mod_cancel_no_" + submissionId)
-                    .build());
-                keyboard.add(row);
-                
-                markup.setKeyboard(keyboard);
-                message.setReplyMarkup(markup);
+                RowBuilder.addRow(row, "✅ Да, отменить", "mod_cancel_confirm_" + submissionId);
+                RowBuilder.addRow(row, "❌ Нет, продолжить", "mod_cancel_no_" + submissionId);
+                message.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
                 
                 Message sent = execute(message);
                 
@@ -3213,42 +2505,18 @@ public class AdminBot extends TelegramLongPollingBot {
         ModerationState state = moderationStates.get(chatId);
         
         // Удаляем форму заявки
-        if (state != null && state.getFormMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getFormMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete form message: " + e.getMessage());
-            }
-        }
+        if (state != null && state.getFormMessageId() != null)
+            deleteMessage(chatId, state.getFormMessageId());
         
         // Удаляем сообщение-запрос, если оно есть
-        if (state != null && state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt message: " + e.getMessage());
-            }
-        }
+        if (state != null && state.getPromptMessageId() != null)
+            deleteMessage(chatId, state.getPromptMessageId());
         
         // Удаляем сообщение подтверждения
         ChatMessages messages = chatMessages.get(chatId);
         if (messages != null) {
-            for (Integer msgId : messages.getOtherMessageIds()) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(msgId);
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    // Игнорируем
-                }
-            }
+            for (Integer msgId : messages.getOtherMessageIds())
+                deleteMessage(chatId, msgId);
             messages.clearOtherMessages();
         }
         
@@ -3263,16 +2531,8 @@ public class AdminBot extends TelegramLongPollingBot {
         // Удаляем только сообщение подтверждения
         ChatMessages messages = chatMessages.get(chatId);
         if (messages != null) {
-            for (Integer msgId : messages.getOtherMessageIds()) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(msgId);
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    // Игнорируем
-                }
-            }
+            for (Integer msgId : messages.getOtherMessageIds())
+                deleteMessage(chatId, msgId);
             messages.clearOtherMessages();
         }
     }
@@ -3363,42 +2623,18 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionBufferRepository.save(submission);
             
             // Удаляем форму заявки
-            if (state.getFormMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getFormMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete form message: " + e.getMessage());
-                }
-            }
+            if (state.getFormMessageId() != null)
+                deleteMessage(chatId, state.getFormMessageId());
             
             // Удаляем сообщение-запрос, если оно есть
-            if (state.getPromptMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getPromptMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete prompt message: " + e.getMessage());
-                }
-            }
+            if (state.getPromptMessageId() != null)
+                deleteMessage(chatId, state.getPromptMessageId());
             
             // Удаляем другие сообщения
             ChatMessages messages = chatMessages.get(chatId);
             if (messages != null) {
-                for (Integer msgId : messages.getOtherMessageIds()) {
-                    try {
-                        DeleteMessage deleteMsg = new DeleteMessage();
-                        deleteMsg.setChatId(chatId.toString());
-                        deleteMsg.setMessageId(msgId);
-                        execute(deleteMsg);
-                    } catch (Exception e) {
-                        // Игнорируем
-                    }
-                }
+                for (Integer msgId : messages.getOtherMessageIds())
+                    deleteMessage(chatId, msgId);
                 messages.clearOtherMessages();
             }
             
@@ -3432,16 +2668,8 @@ public class AdminBot extends TelegramLongPollingBot {
         state.setEditingField(field);
         
         // Удаляем предыдущее сообщение-запрос, если оно существует
-        if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt: " + e.getMessage());
-            }
-        }
+        if (state.getPromptMessageId() != null)
+            deleteMessage(chatId, state.getPromptMessageId());
         
         // Запрашиваем ввод
         String promptText;
@@ -3481,17 +2709,9 @@ public class AdminBot extends TelegramLongPollingBot {
         state.setEditingField("alt");
         
         // Удаляем предыдущее сообщение-запрос, если оно существует
-        if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt: " + e.getMessage());
-            }
-        }
-        
+        if (state.getPromptMessageId() != null)
+            deleteMessage(chatId, state.getPromptMessageId());
+
         // Запрашиваем ввод альтернатив
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
@@ -3669,14 +2889,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем форму
         if (state.getFormMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getFormMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete form: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getFormMessageId());
             state.setFormMessageId(null);
         }
         
@@ -3685,22 +2898,10 @@ public class AdminBot extends TelegramLongPollingBot {
         message.setChatId(chatId.toString());
         message.setText("❓ Вы уверены, что хотите закрыть форму? Все несохраненные данные будут потеряны.");
         
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        
         List<InlineKeyboardButton> row = new ArrayList<>();
-        row.add(InlineKeyboardButton.builder()
-            .text("✅ Да, закрыть")
-            .callbackData("upload_cancel_confirm")
-            .build());
-        row.add(InlineKeyboardButton.builder()
-            .text("❌ Нет, продолжить")
-            .callbackData("upload_cancel_no")
-            .build());
-        keyboard.add(row);
-        
-        markup.setKeyboard(keyboard);
-        message.setReplyMarkup(markup);
+        RowBuilder.addRow(row, "✅ Да, закрыть", "upload_cancel_confirm");
+        RowBuilder.addRow(row, "❌ Нет, продолжить", "upload_cancel_no");
+        message.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
         
         try {
             Message sent = execute(message);
@@ -3723,14 +2924,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем подтверждение
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete confirmation: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
         }
         
@@ -3752,14 +2946,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Удаляем подтверждение
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete confirmation: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
         }
         
@@ -3778,23 +2965,11 @@ public class AdminBot extends TelegramLongPollingBot {
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
         message.setText("❓ Вы уверены, что хотите сохранить изменения?");
-        
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        
+
         List<InlineKeyboardButton> row = new ArrayList<>();
-        row.add(InlineKeyboardButton.builder()
-            .text("✅ Да, сохранить")
-            .callbackData("approved_save_confirm_" + submissionId)
-            .build());
-        row.add(InlineKeyboardButton.builder()
-            .text("❌ Нет")
-            .callbackData("approved_save_no_" + submissionId)
-            .build());
-        keyboard.add(row);
-        
-        markup.setKeyboard(keyboard);
-        message.setReplyMarkup(markup);
+        RowBuilder.addRow(row, "✅ Да, сохранить", "approved_save_confirm_" + submissionId);
+        RowBuilder.addRow(row, "❌ Нет", "approved_save_no_" + submissionId);
+        message.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
         
         try {
             Message sent = execute(message);
@@ -3813,29 +2988,13 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Удаляем сообщение-подтверждение
-            if (state.getPromptMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getPromptMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete prompt: " + e.getMessage());
-                }
-            }
+            if (state.getPromptMessageId() != null)
+                deleteMessage(chatId, state.getPromptMessageId());
             
             // Удаляем форму
-            if (state.getFormMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getFormMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete form: " + e.getMessage());
-                }
-            }
-            
+            if (state.getFormMessageId() != null)
+                deleteMessage(chatId, state.getFormMessageId());
+
             // Получаем одобренный нож
             Knife knife = (Knife) state.getOriginal();
             Long knifeId = knife.getId();
@@ -3920,15 +3079,8 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Просто удаляем сообщение-подтверждение
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-                state.setPromptMessageId(null);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
+            state.setPromptMessageId(null);
         }
     }
     
@@ -3977,23 +3129,11 @@ public class AdminBot extends TelegramLongPollingBot {
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
             message.setText("❓ Вы уверены, что хотите закрыть редактирование?\n\nИзменения не будут сохранены.");
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
+
             List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Да, закрыть")
-                .callbackData("approved_cancel_confirm_" + submissionId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Нет")
-                .callbackData("approved_cancel_no_" + submissionId)
-                .build());
-            keyboard.add(row);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
+            RowBuilder.addRow(row, "✅ Да, закрыть", "approved_cancel_confirm_" + submissionId);
+            RowBuilder.addRow(row, "❌ Нет", "approved_cancel_no_" + submissionId);
+            message.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             
             try {
                 Message sent = execute(message);
@@ -4011,28 +3151,13 @@ public class AdminBot extends TelegramLongPollingBot {
         ModerationState state = moderationStates.get(chatId);
         
         // Удаляем сообщение-подтверждение если есть
-        if (state != null && state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt: " + e.getMessage());
-            }
-        }
+        if (state != null && state.getPromptMessageId() != null)
+            deleteMessage(chatId, state.getPromptMessageId());
+
         
         // Удаляем форму
-        if (state != null && state.getFormMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getFormMessageId());
-                execute(deleteMsg);
-            } catch (Exception e) {
-                logger.warning("Failed to delete form: " + e.getMessage());
-            }
-        }
+        if (state != null && state.getFormMessageId() != null)
+            deleteMessage(chatId, state.getFormMessageId());
         
         moderationStates.remove(chatId);
     }
@@ -4045,15 +3170,8 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Просто удаляем сообщение-подтверждение
         if (state.getPromptMessageId() != null) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(state.getPromptMessageId());
-                execute(deleteMsg);
-                state.setPromptMessageId(null);
-            } catch (Exception e) {
-                logger.warning("Failed to delete prompt: " + e.getMessage());
-            }
+            deleteMessage(chatId, state.getPromptMessageId());
+            state.setPromptMessageId(null);
         }
     }
     
@@ -4113,69 +3231,29 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("🏷️ " + brandName + "\n\nВсего: " + models.size() + " моделей");
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
             for (KnifeModel model : pageModels) {
-                List<InlineKeyboardButton> row = new ArrayList<>();
                 String name = model.getName();
-                if (name.length() > 40) {
+                if (name.length() > 40)
                     name = name.substring(0, 37) + "...";
-                }
-                
-                row.add(InlineKeyboardButton.builder()
-                    .text(name)
-                    .callbackData("admin_search_model_" + model.getId())
-                    .build());
-                keyboard.add(row);
+                keyboard.add(RowBuilder.getRow(name, "admin_search_model_" + model.getId()));
             }
             
             if (totalPages > 1) {
                 List<InlineKeyboardButton> paginationRow = new ArrayList<>();
                 int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
                 int nextPage = (page + 1) % totalPages;
-                
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("⬅️")
-                    .callbackData("admin_brand_models_page_" + prevPage + "_" + brandName)
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text(String.format("%d/%d", page + 1, totalPages))
-                    .callbackData("admin_brand_models_current_page")
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("➡️")
-                    .callbackData("admin_brand_models_page_" + nextPage + "_" + brandName)
-                    .build());
+                RowBuilder.addRow(paginationRow, "⬅️", "admin_brand_models_page_" + prevPage + "_" + brandName);
+                RowBuilder.addRow(paginationRow, String.format("%d/%d", page + 1, totalPages), "admin_brand_models_current_page");
+                RowBuilder.addRow(paginationRow, "➡️", "admin_brand_models_page_" + nextPage + "_" + brandName);
                 keyboard.add(paginationRow);
             }
+            keyboard.add(RowBuilder.getRow("🔍 Поиск", "admin_search_models_" + brandName));
+            keyboard.add(RowBuilder.getRow("🔙 Назад", "admin_search_back"));
+            keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
             
-            List<InlineKeyboardButton> actionRow = new ArrayList<>();
-            actionRow.add(InlineKeyboardButton.builder()
-                .text("🔍 Поиск")
-                .callbackData("admin_search_models_" + brandName)
-                .build());
-            keyboard.add(actionRow);
-            
-            List<InlineKeyboardButton> backRow = new ArrayList<>();
-            backRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Назад")
-                .callbackData("admin_search_back")
-                .build());
-            keyboard.add(backRow);
-            
-            List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(menuRow);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+            message.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
             execute(message);
-            
         } catch (Exception e) {
             logger.severe("Error showing brand models: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при отображении моделей");
@@ -4221,62 +3299,29 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("🔍 Результаты поиска (" + models.size() + " найдено)");
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             for (KnifeModel model : pageModels) {
-                List<InlineKeyboardButton> row = new ArrayList<>();
                 String name = model.getName();
-                if (name.length() > 40) {
+                if (name.length() > 40)
                     name = name.substring(0, 37) + "...";
-                }
-                
-                row.add(InlineKeyboardButton.builder()
-                    .text(name)
-                    .callbackData("admin_search_model_" + model.getId())
-                    .build());
-                keyboard.add(row);
+                keyboard.add(RowBuilder.getRow(name, "admin_search_model_" + model.getId()));
             }
             
             if (totalPages > 1) {
                 List<InlineKeyboardButton> paginationRow = new ArrayList<>();
                 int prevPage = ((page - 1) % totalPages + totalPages) % totalPages;
                 int nextPage = (page + 1) % totalPages;
-                
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("⬅️")
-                    .callbackData("admin_search_models_page_" + prevPage + "_" + brandName + "_" + searchQuery)
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text(String.format("%d/%d", page + 1, totalPages))
-                    .callbackData("admin_search_models_current_page")
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("➡️")
-                    .callbackData("admin_search_models_page_" + nextPage + "_" + brandName + "_" + searchQuery)
-                    .build());
+                RowBuilder.addRow(paginationRow, "⬅️", "admin_search_models_page_" + prevPage + "_" + brandName + "_" + searchQuery);
+                RowBuilder.addRow(paginationRow, String.format("%d/%d", page + 1, totalPages), "admin_search_models_current_page");
+                RowBuilder.addRow(paginationRow, "➡️", "admin_search_models_page_" + nextPage + "_" + brandName + "_" + searchQuery);
                 keyboard.add(paginationRow);
             }
-            
-            List<InlineKeyboardButton> backRow = new ArrayList<>();
-            backRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Назад")
-                .callbackData("admin_search_back")
-                .build());
-            keyboard.add(backRow);
-            
-            List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(menuRow);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+            keyboard.add(RowBuilder.getRow("🔙 Назад", "admin_search_back"));
+            keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
+
+            message.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
             execute(message);
-            
         } catch (Exception e) {
             logger.severe("Error showing search model results: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при отображении результатов");
@@ -4332,14 +3377,11 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("🔍 Результаты поиска (" + results.size() + " найдено)");
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
             for (Object result : pageResults) {
-                List<InlineKeyboardButton> row = new ArrayList<>();
                 String name;
                 String callbackData;
-                
                 if (type.equals("brand")) {
                     Brand brand = (Brand) result;
                     name = brand.getName();
@@ -4349,16 +3391,10 @@ public class AdminBot extends TelegramLongPollingBot {
                     name = model.getName();
                     callbackData = "admin_search_model_" + model.getId();
                 }
-                
-                if (name.length() > 40) {
+                if (name.length() > 40)
                     name = name.substring(0, 37) + "...";
-                }
-                
-                row.add(InlineKeyboardButton.builder()
-                    .text(name)
-                    .callbackData(callbackData)
-                    .build());
-                keyboard.add(row);
+
+                keyboard.add(RowBuilder.getRow(name, callbackData));
             }
             
             if (totalPages > 1) {
@@ -4367,42 +3403,18 @@ public class AdminBot extends TelegramLongPollingBot {
                 int nextPage = (page + 1) % totalPages;
                 
                 String pageCallbackPrefix = "admin_search_page_" + prevPage + "_" + type + "_" + searchQuery;
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("⬅️")
-                    .callbackData(pageCallbackPrefix)
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text(String.format("%d/%d", page + 1, totalPages))
-                    .callbackData("admin_search_current_page")
-                    .build());
-                
+                RowBuilder.addRow(paginationRow, "⬅️", pageCallbackPrefix);
+                RowBuilder.addRow(paginationRow, String.format("%d/%d", page + 1, totalPages), "admin_search_current_page");
+
                 pageCallbackPrefix = "admin_search_page_" + nextPage + "_" + type + "_" + searchQuery;
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("➡️")
-                    .callbackData(pageCallbackPrefix)
-                    .build());
+                RowBuilder.addRow(paginationRow, "➡️", pageCallbackPrefix);
                 keyboard.add(paginationRow);
             }
+            keyboard.add(RowBuilder.getRow("🔙 Назад", "admin_search_back"));
+            keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
             
-            List<InlineKeyboardButton> backRow = new ArrayList<>();
-            backRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Назад")
-                .callbackData("admin_search_back")
-                .build());
-            keyboard.add(backRow);
-            
-            List<InlineKeyboardButton> menuRow = new ArrayList<>();
-            menuRow.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(menuRow);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+            message.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
             execute(message);
-            
         } catch (Exception e) {
             logger.severe("Error showing search results: " + e.getMessage());
         }
@@ -4448,20 +3460,8 @@ public class AdminBot extends TelegramLongPollingBot {
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
             message.setText("📋 Журнал ошибок пуст");
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("🔙 Главное меню")
-                .callbackData("back_to_menu")
-                .build());
-            keyboard.add(row);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+            message.setReplyMarkup(new InlineKeyboardMarkup(List.of(
+                    RowBuilder.getRow("🔙 Главное меню", "back_to_menu"))));
             try {
                 Message sent = execute(message);
                 messages.setLastWindowMessageId(sent.getMessageId());
@@ -4515,30 +3515,14 @@ public class AdminBot extends TelegramLongPollingBot {
         SendMessage actionMessage = new SendMessage();
         actionMessage.setChatId(chatId.toString());
         actionMessage.setText("Выберите действие:");
-        
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+        keyboard.add(RowBuilder.getRow("🗑️ Очистить журнал", "error_log_clear"));
+        keyboard.add(RowBuilder.getRow("🔙 Главное меню", "back_to_menu"));
         
-        List<InlineKeyboardButton> row1 = new ArrayList<>();
-        row1.add(InlineKeyboardButton.builder()
-            .text("🗑️ Очистить журнал")
-            .callbackData("error_log_clear")
-            .build());
-        keyboard.add(row1);
-        
-        List<InlineKeyboardButton> row2 = new ArrayList<>();
-        row2.add(InlineKeyboardButton.builder()
-            .text("🔙 Главное меню")
-            .callbackData("back_to_menu")
-            .build());
-        keyboard.add(row2);
-        
-        markup.setKeyboard(keyboard);
-        actionMessage.setReplyMarkup(markup);
+        actionMessage.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
         
         try {
             Message sent = execute(actionMessage);
-            // НОВОЕ: Сохраняем ID сообщения с кнопками
             messages.setLastWindowMessageId(sent.getMessageId());
         } catch (TelegramApiException e) {
             logger.severe("Error sending action message: " + e.getMessage());
@@ -4641,18 +3625,10 @@ public class AdminBot extends TelegramLongPollingBot {
         // Удаляем все недавние сообщения окон
         int deletedCount = 0;
         for (Integer msgId : toDelete) {
-            try {
-                DeleteMessage deleteMsg = new DeleteMessage();
-                deleteMsg.setChatId(chatId.toString());
-                deleteMsg.setMessageId(msgId);
-                execute(deleteMsg);
+                deleteMessage(chatId, msgId);
                 deletedCount++;
-                logger.info("DEBUG: Deleted message " + msgId);
-            } catch (Exception e) {
-                logger.info("DEBUG: Failed to delete message " + msgId + ": " + e.getMessage());
-            }
         }
-        
+
         // Очищаем список ПОСЛЕ удаления
         messages.clearRecentWindowMessages();
         logger.info("DEBUG: Deleted " + deletedCount + " messages, cleared list");
@@ -4672,31 +3648,6 @@ public class AdminBot extends TelegramLongPollingBot {
             execute(deleteMessage);
         } catch (Exception e) {
             // Игнорируем ошибки удаления (сообщение может быть уже удалено)
-        }
-    }
-    
-    /**
-     * Удаляет сообщение пользователя из чата.
-     * Используется для очистки чата от введенных данных после их обработки.
-     * 
-     * @param chatId ID чата
-     * @param messageId ID сообщения для удаления
-     */
-    private void deleteUserMessage(Long chatId, Integer messageId) {
-        if (messageId == null) {
-            logger.warning("Попытка удалить сообщение с null ID");
-            return;
-        }
-        
-        try {
-            DeleteMessage deleteMsg = new DeleteMessage();
-            deleteMsg.setChatId(chatId.toString());
-            deleteMsg.setMessageId(messageId);
-            execute(deleteMsg);
-            logger.info("Удалено сообщение пользователя: " + messageId + " в чате " + chatId);
-        } catch (TelegramApiException e) {
-            // Логируем, но не прерываем выполнение
-            logger.warning("Не удалось удалить сообщение пользователя " + messageId + ": " + e.getMessage());
         }
     }
     
@@ -4721,15 +3672,8 @@ public class AdminBot extends TelegramLongPollingBot {
 
     private void handleSeparatorInput(Long chatId, String separator, Integer userMessageId) {
         // Удаляем сообщение пользователя
-        try {
-            DeleteMessage deleteMsg = new DeleteMessage();
-            deleteMsg.setChatId(chatId.toString());
-            deleteMsg.setMessageId(userMessageId);
-            execute(deleteMsg);
-        } catch (Exception e) {
-            logger.warning("Failed to delete user message: " + e.getMessage());
-        }
-        
+        deleteMessage(chatId, userMessageId);
+
         // Валидация разделителя
         if (separator == null || separator.trim().isEmpty()) {
             sendMessage(chatId, "❌ Разделитель не может быть пустым");
@@ -4755,28 +3699,10 @@ public class AdminBot extends TelegramLongPollingBot {
         message.setChatId(chatId.toString());
         message.setText("⚙️ Настройки\n\nТекущий разделитель альтернатив: \"" + alternativeSeparator + "\"");
         
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-        
-        // Кнопка для изменения разделителя
-        List<InlineKeyboardButton> row1 = new ArrayList<>();
-        row1.add(InlineKeyboardButton.builder()
-            .text("✏️ Изменить знак разделителя")
-            .callbackData("settings_change_separator")
-            .build());
-        keyboard.add(row1);
-        
-        // Кнопка закрытия
-        List<InlineKeyboardButton> row2 = new ArrayList<>();
-        row2.add(InlineKeyboardButton.builder()
-            .text("❌ Закрыть настройки")
-            .callbackData("back_to_menu")
-            .build());
-        keyboard.add(row2);
-        
-        markup.setKeyboard(keyboard);
-        message.setReplyMarkup(markup);
-        
+        keyboard.add(RowBuilder.getRow("✏️ Изменить знак разделителя", "settings_change_separator"));
+        keyboard.add(RowBuilder.getRow("❌ Закрыть настройки", "back_to_menu"));
+        message.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
         try {
             Message sent = execute(message);
             ChatMessages messages = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
@@ -4788,9 +3714,6 @@ public class AdminBot extends TelegramLongPollingBot {
     
     /**
      * Обработчик подтверждения добавления транзитивных альтернатив.
-     * Требование 9.7: При добавлении альтернативы к одобренному сертификату через редактирование
-     * система должна запустить поиск транзитивных альтернатив и предложить их модератору.
-     * 
      * @param chatId ID чата
      * @param knifeId ID ножа
      */
@@ -4831,16 +3754,8 @@ public class AdminBot extends TelegramLongPollingBot {
             knifeRepository.save(knife);
             
             // Удаляем сообщение с предложением
-            if (state.getTransitiveMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getTransitiveMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete transitive message: " + e.getMessage());
-                }
-            }
+            if (state.getTransitiveMessageId() != null)
+                deleteMessage(chatId, state.getTransitiveMessageId());
             
             sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
             moderationStates.remove(chatId);
@@ -4867,16 +3782,8 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Удаляем сообщение с предложением
-            if (state.getTransitiveMessageId() != null) {
-                try {
-                    DeleteMessage deleteMsg = new DeleteMessage();
-                    deleteMsg.setChatId(chatId.toString());
-                    deleteMsg.setMessageId(state.getTransitiveMessageId());
-                    execute(deleteMsg);
-                } catch (Exception e) {
-                    logger.warning("Failed to delete transitive message: " + e.getMessage());
-                }
-            }
+            if (state.getTransitiveMessageId() != null)
+                    deleteMessage(chatId, state.getTransitiveMessageId());
             
             sendMessage(chatId, "✅ Изменения сохранены!");
             moderationStates.remove(chatId);
@@ -4918,30 +3825,15 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage.setChatId(chatId.toString());
             sendMessage.setText(message.toString());
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
             List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("✅ Да")
-                .callbackData("transitive_yes_" + knifeId)
-                .build());
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Нет")
-                .callbackData("transitive_no_" + knifeId)
-                .build());
-            keyboard.add(row);
-            
-            markup.setKeyboard(keyboard);
-            sendMessage.setReplyMarkup(markup);
+            RowBuilder.addRow(row, "✅ Да", "transitive_yes_" + knifeId);
+            RowBuilder.addRow(row, "❌ Нет", "transitive_no_" + knifeId);
+            sendMessage.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             
             Message sent = execute(sendMessage);
-            
             ModerationState state = moderationStates.get(chatId);
-            if (state != null) {
+            if (state != null)
                 state.setTransitiveMessageId(sent.getMessageId());
-            }
-            
         } catch (Exception e) {
             logger.severe("Error showing transitive alternatives proposal: " + e.getMessage());
         }
@@ -5001,10 +3893,8 @@ public class AdminBot extends TelegramLongPollingBot {
             message.setChatId(chatId.toString());
             message.setText("🏷️ " + brandName + "\nВсего: " + knives.size() + " моделей");
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
             
-            // Список моделей (до 20 на странице)
             int itemsPerPage = 20;
             int endIndex = Math.min(itemsPerPage, knives.size());
             
@@ -5015,36 +3905,22 @@ public class AdminBot extends TelegramLongPollingBot {
                 if (displayName.length() > 30) {
                     displayName = displayName.substring(0, 27) + "...";
                 }
-                
-                currentRow.add(InlineKeyboardButton.builder()
-                    .text(displayName)
-                    .callbackData("view_approved_" + knife.getId())
-                    .build());
-                
+                RowBuilder.addRow(currentRow, displayName, "view_approved_" + knife.getId());
+
                 if (currentRow.size() == 2) {
                     keyboard.add(currentRow);
                     currentRow = new ArrayList<>();
                 }
             }
-            
-            if (!currentRow.isEmpty()) {
+            if (!currentRow.isEmpty())
                 keyboard.add(currentRow);
-            }
-            
-            // Кнопка "Назад"
-            List<InlineKeyboardButton> backRow = new ArrayList<>();
-            backRow.add(InlineKeyboardButton.builder()
-                .text("🔙 К главному меню")
-                .callbackData("menu_back_to_main")
-                .build());
-            keyboard.add(backRow);
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+
+            keyboard.add(RowBuilder.getRow("🔙 К главному меню", "menu_back_to_main"));
+            message.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
             Message sent = execute(message);
             navigationStackService.setLevel(chatId, 1, sent.getMessageId());
-            
+            ChatMessages chatMsgs = chatMessages.computeIfAbsent(chatId, k -> new ChatMessages());
+            chatMsgs.getRecentWindowMessages().add(sent.getMessageId());
         } catch (Exception e) {
             logger.severe("Error handling admin brand selection: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при загрузке моделей бренда");
@@ -5065,96 +3941,42 @@ public class AdminBot extends TelegramLongPollingBot {
             int endIndex = Math.min(startIndex + itemsPerPage, allBrands.size());
             List<Brand> pageBrands = allBrands.subList(startIndex, endIndex);
             
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            // Сетка брендов
             List<InlineKeyboardButton> currentRow = new ArrayList<>();
-            for (int i = 0; i < pageBrands.size(); i++) {
-                Brand brand = pageBrands.get(i);
+            for (Brand brand : pageBrands) {
                 String displayName = brand.getName();
-                if (displayName.length() > 15) {
+                if (displayName.length() > 15)
                     displayName = displayName.substring(0, 12) + "...";
-                }
-                
-                currentRow.add(InlineKeyboardButton.builder()
-                    .text(displayName)
-                    .callbackData("admin_brand_" + brand.getName())
-                    .build());
-                
+
+                RowBuilder.addRow(currentRow, displayName, "admin_brand_" + brand.getName());
                 if (currentRow.size() == 3) {
                     keyboard.add(currentRow);
                     currentRow = new ArrayList<>();
                 }
             }
-            
-            if (!currentRow.isEmpty()) {
+            if (!currentRow.isEmpty())
                 keyboard.add(currentRow);
-            }
-            
-            // Пагинация
             if (totalPages > 1) {
                 List<InlineKeyboardButton> paginationRow = new ArrayList<>();
                 int prevPage = (page - 1 + totalPages) % totalPages;
                 int nextPage = (page + 1) % totalPages;
-                
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("⬅️")
-                    .callbackData("admin_main_page_" + prevPage)
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text((page + 1) + "/" + totalPages)
-                    .callbackData("admin_main_current_page")
-                    .build());
-                paginationRow.add(InlineKeyboardButton.builder()
-                    .text("➡️")
-                    .callbackData("admin_main_page_" + nextPage)
-                    .build());
+                RowBuilder.addRow(paginationRow, "⬅️", "admin_main_page_" + prevPage);
+                RowBuilder.addRow(paginationRow, (page + 1) + "/" + totalPages, "admin_main_current_page");
+                RowBuilder.addRow(paginationRow, "➡️", "admin_main_page_" + nextPage);
                 keyboard.add(paginationRow);
             }
-            
-            // Остальные кнопки
-            List<InlineKeyboardButton> searchRow = new ArrayList<>();
-            searchRow.add(InlineKeyboardButton.builder()
-                .text("🔍 Поиск")
-                .callbackData("menu_search")
-                .build());
-            keyboard.add(searchRow);
-            
-            List<InlineKeyboardButton> uploadRow = new ArrayList<>();
-            uploadRow.add(InlineKeyboardButton.builder()
-                .text("📤 Загрузить")
-                .callbackData("menu_upload")
-                .build());
-            keyboard.add(uploadRow);
-            
-            List<InlineKeyboardButton> pendingRow = new ArrayList<>();
-            pendingRow.add(InlineKeyboardButton.builder()
-                .text("📋 Ожидающие заявки")
-                .callbackData("menu_pending")
-                .build());
-            keyboard.add(pendingRow);
-            
-            List<InlineKeyboardButton> errorLogRow = new ArrayList<>();
-            errorLogRow.add(InlineKeyboardButton.builder()
-                .text("📋 Журнал ошибок")
-                .callbackData("menu_error_log")
-                .build());
-            keyboard.add(errorLogRow);
-            
-            List<InlineKeyboardButton> settingsRow = new ArrayList<>();
-            settingsRow.add(InlineKeyboardButton.builder()
-                .text("⚙️ Настройки")
-                .callbackData("menu_settings")
-                .build());
-            keyboard.add(settingsRow);
-            
+            keyboard.add(RowBuilder.getRow( "🔍 Поиск", "menu_search"));
+            keyboard.add(RowBuilder.getRow("📤 Загрузить", "menu_upload"));
+            keyboard.add(RowBuilder.getRow("📋 Ожидающие заявки", "menu_pending"));
+            keyboard.add(RowBuilder.getRow("📋 Журнал ошибок", "menu_error_log"));
+            keyboard.add(RowBuilder.getRow("⚙️ Настройки", "menu_settings"));
+
             ChatMessages messages = chatMessages.get(chatId);
             if (messages != null && messages.getMainMenuMessageId() != null) {
                 EditMessageReplyMarkup editMarkup = new EditMessageReplyMarkup();
                 editMarkup.setChatId(chatId.toString());
                 editMarkup.setMessageId(messages.getMainMenuMessageId());
-                editMarkup.setReplyMarkup(markup);
+                editMarkup.setReplyMarkup(new InlineKeyboardMarkup(keyboard));
                 execute(editMarkup);
             }
             

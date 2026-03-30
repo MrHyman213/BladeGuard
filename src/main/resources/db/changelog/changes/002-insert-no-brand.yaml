@@ -1,0 +1,14 @@
+databaseChangeLog:
+  # ── Добавляем бренд "Ножи без бренда" с id=1 ──────────────────────────────
+  - changeSet:
+      id: 002-insert-no-brand
+      author: system
+      comment: "Insert 'No Brand' brand with id=1"
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO brands (id, name) VALUES (1, NULL)
+              ON CONFLICT (id) DO NOTHING;
+        - sql:
+            sql: |
+              SELECT setval('brands_id_seq', COALESCE((SELECT MAX(id) FROM brands), 0) + 1, false);

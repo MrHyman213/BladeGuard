@@ -10,6 +10,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
+import com.knifecerts.model.*;
+import com.knifecerts.repository.UserMainMenuRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -26,12 +28,6 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMa
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import com.knifecerts.model.Brand;
-import com.knifecerts.model.ConversationState;
-import com.knifecerts.model.ConversationStep;
-import com.knifecerts.model.Knife;
-import com.knifecerts.model.KnifeModel;
-import com.knifecerts.model.SubmissionBuffer;
 import com.knifecerts.repository.BrandRepository;
 import com.knifecerts.repository.KnifeModelRepository;
 import com.knifecerts.service.AlternativesParser;
@@ -67,6 +63,9 @@ public class KnifeBot extends TelegramLongPollingBot {
     
     @Autowired
     private KnifeModelRepository knifeModelRepository;
+
+    @Autowired
+    private UserMainMenuRepository userMainMenuRepository;
     
     // Константа для разделителя альтернативных моделей
     private static final String ALTERNATIVE_SEPARATOR = "/";
@@ -144,9 +143,8 @@ public class KnifeBot extends TelegramLongPollingBot {
             state.setMainMenuMessageId(mainMenu.getMessageId());
             state.setCurrentPage(0);
             
-            // Устанавливаем главное меню на уровень 0 стека
+            userMainMenuRepository.save(new UserMainMenu(chatId, mainMenu.getMessageId()));
             navigationStackService.setLevel(userId, 0, mainMenu.getMessageId());
-            
             conversationStateManager.updateState(userId, state);
             
         } catch (Exception e) {

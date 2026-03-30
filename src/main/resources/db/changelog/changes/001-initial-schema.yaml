@@ -20,7 +20,7 @@ databaseChangeLog:
                   name: name
                   type: VARCHAR(255)
                   constraints:
-                    nullable: false
+                    nullable: true
                     unique: true
 
         # ── knife_models ─────────────────────────────────────────────────────
