@@ -449,6 +449,9 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleErrorLog(chatId);
             } else if (data.equals("menu_settings")) {
                 handleSettingsCommand(chatId);
+            } else if (data.equals("menu_test")) {
+                System.out.println("hello world!");
+                toastMessage = "hello world!";
             } else if (data.equals("menu_back_to_main")) {
                 // Удаляем все сообщения кроме главного меню
                 deleteRecentMessages(chatId, null);
@@ -471,7 +474,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 toastMessage = "💾 Сертификат сохранен";
             } else if (data.equals("upload_add")) {
                 handleUploadAdd(chatId);
-                toastMessage = "➕ Альтернатива добавлена";
             } else if (data.equals("upload_cancel")) {
                 handleUploadCancelRequest(chatId);
             } else if (data.equals("upload_cancel_confirm")) {
@@ -1391,6 +1393,7 @@ public class AdminBot extends TelegramLongPollingBot {
             keyboard.add(RowBuilder.getRow("📋 Ожидающие заявки", "menu_pending"));
             keyboard.add(RowBuilder.getRow("📋 Журнал ошибок", "menu_error_log"));
             keyboard.add(RowBuilder.getRow("⚙️ Настройки", "menu_settings"));
+            keyboard.add(RowBuilder.getRow("🧪 Тест", "menu_test"));
             
             markup.setKeyboard(keyboard);
             message.setReplyMarkup(markup);
