@@ -2,6 +2,7 @@ package com.knifecerts.model;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -17,7 +18,7 @@ import jakarta.persistence.Table;
 
 @Entity
 @Table(name = "knives")
-public class Knife {
+public class Knife implements Moderatable{
     
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -118,13 +119,37 @@ public class Knife {
             display.append(brand.getName());
         }
         if (model != null) {
-            if (display.length() > 0) display.append(" - ");
+            if (!display.isEmpty()) display.append(" - ");
             display.append(model.getName());
         }
         if (index != null) {
-            if (display.length() > 0) display.append(" - ");
+            if (!display.isEmpty()) display.append(" - ");
             display.append(index);
         }
-        return display.length() > 0 ? display.toString() : "Unknown";
+        return !display.isEmpty() ? display.toString() : "Unknown";
+    }
+
+    @Override
+    public String getModelName() {
+        return model != null ? model.getName() : "";
+    }
+
+    @Override
+    public String getBrandName() {
+        return brand != null ? brand.getName() : "";
+    }
+
+    @Override
+    public String getIndexValue() {
+        return index;
+    }
+
+    @Override
+    public String getAlternativesText(String separator) {
+        if (alternatives == null || alternatives.isEmpty())
+            return "";
+        return alternatives.stream()
+                .map(alt -> alt.getBrand().getName() + separator + alt.getModel().getName())
+                .collect(Collectors.joining(", "));
     }
 }

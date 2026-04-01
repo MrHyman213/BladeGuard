@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+
+import com.knifecerts.service.SettingsService;
 import org.mockito.ArgumentCaptor;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -48,6 +50,7 @@ class YandexDiskServicePropertyTest {
             @ForAll("newPhotoPaths") String newPath) throws IOException {
 
         // Arrange
+        SettingsService settingsService = mock(SettingsService.class);
         YandexDiskService yandexDiskService = mock(YandexDiskService.class);
         KnifeRepository knifeRepository = mock(KnifeRepository.class);
         BrandRepository brandRepository = mock(BrandRepository.class);
@@ -61,7 +64,8 @@ class YandexDiskServicePropertyTest {
                 knifeModelRepository,
                 knifeRepository,
                 yandexDiskService,
-                mainMenuUpdateService);
+                mainMenuUpdateService,
+                settingsService);
 
         Knife knife = mock(Knife.class);
         when(knife.getPhotoPath()).thenReturn(oldPath);

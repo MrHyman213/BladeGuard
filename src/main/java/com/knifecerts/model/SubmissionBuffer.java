@@ -11,7 +11,7 @@ import jakarta.persistence.Table;
 
 @Entity
 @Table(name = "submissions_buffer")
-public class SubmissionBuffer {
+public class SubmissionBuffer implements Moderatable{
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -78,6 +78,7 @@ public class SubmissionBuffer {
         this.username = username;
     }
 
+    @Override
     public String getModelName() {
         return modelName;
     }
@@ -86,6 +87,7 @@ public class SubmissionBuffer {
         this.modelName = modelName;
     }
 
+    @Override
     public String getBrandName() {
         return brandName;
     }
@@ -132,13 +134,23 @@ public class SubmissionBuffer {
             display.append(brandName);
         }
         if (modelName != null) {
-            if (display.length() > 0) display.append(" - ");
+            if (!display.isEmpty()) display.append(" - ");
             display.append(modelName);
         }
         if (index != null) {
-            if (display.length() > 0) display.append(" - ");
+            if (!display.isEmpty()) display.append(" - ");
             display.append(index);
         }
-        return display.length() > 0 ? display.toString() : "Unknown";
+        return !display.isEmpty() ? display.toString() : "Unknown";
+    }
+
+    @Override
+    public String getIndexValue() {
+        return getIndex();
+    }
+
+    @Override
+    public String getAlternativesText(String separator) {
+        return getAlternatives();
     }
 }

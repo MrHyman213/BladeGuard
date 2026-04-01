@@ -31,6 +31,7 @@ public class SubmissionBufferService {
     private final KnifeRepository knifeRepository;
     private final YandexDiskService yandexDiskService;
     private final MainMenuUpdateService mainMenuUpdateService;
+    private final SettingsService settingsService;
 
     @Autowired
     public SubmissionBufferService(
@@ -39,13 +40,14 @@ public class SubmissionBufferService {
             KnifeModelRepository knifeModelRepository,
             KnifeRepository knifeRepository,
             YandexDiskService yandexDiskService,
-            MainMenuUpdateService mainMenuUpdateService) {
+            MainMenuUpdateService mainMenuUpdateService, SettingsService settingsService) {
         this.submissionBufferRepository = submissionBufferRepository;
         this.brandRepository = brandRepository;
         this.knifeModelRepository = knifeModelRepository;
         this.knifeRepository = knifeRepository;
         this.yandexDiskService = yandexDiskService;
         this.mainMenuUpdateService = mainMenuUpdateService;
+        this.settingsService = settingsService;
     }
 
     public SubmissionBuffer createSubmission(Long userId, String username, String modelName, 
@@ -184,7 +186,7 @@ public class SubmissionBufferService {
         String alternativesStr = submission.getAlternatives();
         if (alternativesStr != null && !alternativesStr.isEmpty()) {
             // Используем разделитель "/" для парсинга (AlternativesParser нормализует пробелы)
-            AlternativesParser parser = new AlternativesParserImpl("/");
+            AlternativesParser parser = new AlternativesParserImpl(settingsService);
             List<AlternativeEntry> alternatives = parser.parse(alternativesStr);
 
             for (AlternativeEntry altEntry : alternatives) {

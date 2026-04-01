@@ -1,0 +1,40 @@
+databaseChangeLog:
+  - changeSet:
+      id: 003-create-settings-table
+      author: system
+      comment: "Create settings table for bot configuration"
+      changes:
+        - createTable:
+            tableName: settings
+            columns:
+              - column:
+                  name: key
+                  type: VARCHAR(50)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: value
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: description
+                  type: TEXT
+              - column:
+                  name: updated_at
+                  type: TIMESTAMP
+                  defaultValueComputed: CURRENT_TIMESTAMP
+
+        - insert:
+            tableName: settings
+            columns:
+              - column:
+                  name: key
+                  value: alternative_separator
+              - column:
+                  name: value
+                  value: "/"
+              - column:
+                  name: description
+                  value: "Разделитель между колонками в альтернативах (бренд/название)"

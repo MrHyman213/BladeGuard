@@ -14,6 +14,7 @@ import java.util.stream.Collectors;
 
 import com.knifecerts.model.*;
 import com.knifecerts.repository.*;
+import com.knifecerts.service.*;
 import com.knifecerts.util.RowBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,19 +32,9 @@ import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import com.knifecerts.dto.AlternativeEntry;
-import com.knifecerts.service.AlternativesParser;
-import com.knifecerts.service.AlternativesParserImpl;
-import com.knifecerts.service.CaptionParser;
-import com.knifecerts.service.KnifeService;
-import com.knifecerts.service.MainMenuUpdateService;
-import com.knifecerts.service.NavigationStackService;
-import com.knifecerts.service.SubmissionBufferService;
-import com.knifecerts.service.TransitiveAlternativesService;
-import com.knifecerts.service.YandexDiskService;
 
 @Component
 public class AdminBot extends TelegramLongPollingBot {
@@ -78,6 +69,9 @@ public class AdminBot extends TelegramLongPollingBot {
     private KnifeRepository knifeRepository;
 
     @Autowired
+    private ModerationStateService moderationStateService;
+
+    @Autowired
     private UserMainMenuRepository userMainMenuRepository;
     
     @Autowired
@@ -91,12 +85,12 @@ public class AdminBot extends TelegramLongPollingBot {
     
     @Autowired
     private CaptionParser captionParser;
+
+    @Autowired
+    private SettingsService settingsService;
     
     @Autowired
     private AlternativesParser alternativesParser;
-    
-    // Хранилище состояний модерации для каждого чата
-    private final java.util.Map<Long, ModerationState> moderationStates = new java.util.concurrent.ConcurrentHashMap<>();
     
     // Хранилище состояний поиска для каждого чата
     private final java.util.Map<Long, String> searchStates = new java.util.concurrent.ConcurrentHashMap<>();
@@ -113,9 +107,6 @@ public class AdminBot extends TelegramLongPollingBot {
     // Журнал ошибок (последние 50)
     private final java.util.Queue<ErrorLog> errorLogs = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private static final int MAX_ERROR_LOGS = 50;
-    
-    // Разделитель для альтернативных моделей
-    private String alternativeSeparator = ",";
     
     // Внутренний класс для хранения ID сообщений чата
     private static class ChatMessages {
@@ -173,130 +164,6 @@ public class AdminBot extends TelegramLongPollingBot {
         public LocalDateTime getTimestamp() { return timestamp; }
         public String getOperation() { return operation; }
         public String getError() { return error; }
-    }
-    
-    // Внутренний класс для хранения состояния модерации
-    private static class ModerationState {
-        private final Object original; // SubmissionBuffer или Knife
-        private String name;
-        private String brand;
-        private String indexCode;
-        private List<String> alternativeModels;
-        private Integer formMessageId;
-        private Integer promptMessageId;
-        private String editingField; // "name", "brand", "index", "alt"
-        private boolean isApprovedView; // true если это просмотр одобренного сертификата
-        private Set<Long> transitiveAlternativeIds; // ID транзитивных альтернатив
-        private Integer transitiveMessageId; // ID сообщения с предложением транзитивных альтернатив
-        private Long approvedKnifeId; // ID одобренного ножа (для поиска транзитивных)
-        private String photoPath; // Путь к фото (для прямой загрузки)
-        
-        public ModerationState(SubmissionBuffer original) {
-            this.original = original;
-            this.name = original.getModelName();
-            this.brand = original.getBrandName();
-            this.indexCode = original.getIndex();
-            // Parse alternatives from TEXT field
-            AlternativesParser parser = new AlternativesParserImpl("/");
-            this.alternativeModels = parser.parse(original.getAlternatives()).stream()
-                .map(alt -> (alt.brand() != null ? alt.brand() + " / " : "") + alt.name())
-                .collect(java.util.stream.Collectors.toList());
-            this.isApprovedView = false;
-        }
-        
-        public ModerationState(Knife original, boolean isApprovedView) {
-            this.original = original;
-            this.name = original.getModel() != null ? original.getModel().getName() : null;
-            this.brand = original.getBrand() != null ? original.getBrand().getName() : null;
-            this.indexCode = original.getIndex() != null ? original.getIndex() : null;
-            this.alternativeModels = original.getAlternatives().stream()
-                .map(alt -> alt.getBrand().getName() + " / " + alt.getModel().getName())
-                .collect(java.util.stream.Collectors.toList());
-            this.isApprovedView = isApprovedView;
-        }
-        
-        public ModerationState(Object original, boolean isApprovedView) {
-            this.original = original;
-            this.isApprovedView = isApprovedView;
-        }
-        
-        // Проверка были ли изменения
-        public boolean hasChanges() {
-            if (original instanceof SubmissionBuffer) {
-                SubmissionBuffer sub = (SubmissionBuffer) original;
-                String originalName = sub.getModelName();
-                String originalBrand = sub.getBrandName();
-                String originalIndex = sub.getIndex();
-                AlternativesParser parser = new AlternativesParserImpl("/");
-                List<String> originalAlts = parser.parse(sub.getAlternatives()).stream()
-                    .map(alt -> (alt.brand() != null ? alt.brand() + " / " : "") + alt.name())
-                    .collect(java.util.stream.Collectors.toList());
-                
-                boolean nameChanged = !java.util.Objects.equals(originalName, name);
-                boolean brandChanged = !java.util.Objects.equals(originalBrand, brand);
-                boolean indexChanged = !java.util.Objects.equals(originalIndex, indexCode);
-                boolean altsChanged = !java.util.Objects.equals(originalAlts, alternativeModels);
-                
-                return nameChanged || brandChanged || indexChanged || altsChanged;
-            } else if (original instanceof Knife) {
-                Knife knife = (Knife) original;
-                String originalName = knife.getModel().getName();
-                String originalBrand = knife.getBrand().getName();
-                String originalIndex = knife.getIndex();
-                List<String> originalAlts = knife.getAlternatives().stream()
-                    .map(alt -> alt.getBrand().getName() + " / " + alt.getModel().getName())
-                    .collect(java.util.stream.Collectors.toList());
-                
-                boolean nameChanged = !java.util.Objects.equals(originalName, name);
-                boolean brandChanged = !java.util.Objects.equals(originalBrand, brand);
-                boolean indexChanged = !java.util.Objects.equals(originalIndex, indexCode);
-                boolean altsChanged = !java.util.Objects.equals(originalAlts, alternativeModels);
-                
-                return nameChanged || brandChanged || indexChanged || altsChanged;
-            }
-            return false;
-        }
-        
-        public Object getOriginal() { return original; }
-        public String getName() { return name; }
-        public void setName(String name) { this.name = name; }
-        public String getBrand() { return brand; }
-        public void setBrand(String brand) { this.brand = brand; }
-        public String getIndexCode() { return indexCode; }
-        public void setIndexCode(String indexCode) { this.indexCode = indexCode; }
-        public List<String> getAlternativeModels() { return alternativeModels; }
-        public void setAlternativeModels(List<String> alternativeModels) { this.alternativeModels = alternativeModels; }
-        public Integer getFormMessageId() { return formMessageId; }
-        public void setFormMessageId(Integer formMessageId) { this.formMessageId = formMessageId; }
-        public Integer getPromptMessageId() { return promptMessageId; }
-        public void setPromptMessageId(Integer promptMessageId) { this.promptMessageId = promptMessageId; }
-        public String getEditingField() { return editingField; }
-        public void setEditingField(String editingField) { this.editingField = editingField; }
-        public boolean isApprovedView() { return isApprovedView; }
-        public void setApprovedView(boolean approvedView) { this.isApprovedView = approvedView; }
-        public Set<Long> getTransitiveAlternativeIds() { return transitiveAlternativeIds; }
-        public void setTransitiveAlternativeIds(Set<Long> ids) { this.transitiveAlternativeIds = ids; }
-        public Integer getTransitiveMessageId() { return transitiveMessageId; }
-        public void setTransitiveMessageId(Integer messageId) { this.transitiveMessageId = messageId; }
-        public Long getApprovedKnifeId() { return approvedKnifeId; }
-        public void setApprovedKnifeId(Long knifeId) { this.approvedKnifeId = knifeId; }
-        
-        public String getPhotoPath() { return photoPath; }
-        public void setPhotoPath(String photoPath) { this.photoPath = photoPath; }
-        
-        private Long duplicateKnifeId; // ID дубликата ножа (если найден)
-        private Integer duplicateMessageId; // ID сообщения с предложением замены фото
-        private Integer confirmationMessageId; // ID сообщения-подтверждения альтернатив (Req 14.8)
-        private Long pendingSubmissionId; // ID заявки, на которую хотим переключиться (для подтверждения)
-        
-        public Long getDuplicateKnifeId() { return duplicateKnifeId; }
-        public void setDuplicateKnifeId(Long knifeId) { this.duplicateKnifeId = knifeId; }
-        public Integer getDuplicateMessageId() { return duplicateMessageId; }
-        public void setDuplicateMessageId(Integer messageId) { this.duplicateMessageId = messageId; }
-        public Integer getConfirmationMessageId() { return confirmationMessageId; }
-        public void setConfirmationMessageId(Integer messageId) { this.confirmationMessageId = messageId; }
-        public Long getPendingSubmissionId() { return pendingSubmissionId; }
-        public void setPendingSubmissionId(Long submissionId) { this.pendingSubmissionId = submissionId; }
     }
 
     @Override
@@ -360,8 +227,7 @@ public class AdminBot extends TelegramLongPollingBot {
                                 handleSeparatorInput(chatId, messageText, update.getMessage().getMessageId());
                             }
                         } else {
-                            // Проверяем, есть ли активное состояние редактирования
-                            ModerationState state = moderationStates.get(chatId);
+                            ModerationState state = moderationStateService.getState(chatId);
                             if (state != null && state.getEditingField() != null) {
                                 // Проверяем, ожидаем ли мы фото для загрузки
                                 com.knifecerts.model.ConversationStep adminStep = adminPhotoSteps.get(chatId);
@@ -383,10 +249,7 @@ public class AdminBot extends TelegramLongPollingBot {
             logger.severe("Неожиданная ошибка в AdminBot: " + e.getClass().getName() + " - " + e.getMessage());
             
             // Игнорируем сетевые ошибки Telegram API
-            if (e instanceof java.net.UnknownHostException ||
-                e instanceof java.net.SocketTimeoutException ||
-                e.getCause() instanceof java.net.UnknownHostException ||
-                e.getCause() instanceof java.net.SocketTimeoutException) {
+            if (e.getCause() instanceof java.net.UnknownHostException || e.getCause() instanceof java.net.SocketTimeoutException) {
                 logger.warning("Сетевая ошибка Telegram API (игнорируется): " + e.getMessage());
                 return;
             }
@@ -486,7 +349,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Вызываем deleteRecentMessages для удаления всех отслеживаемых сообщений
                 deleteRecentMessages(chatId, null);
                 // Очищаем состояния
-                moderationStates.remove(chatId);
+                moderationStateService.removeState(chatId);
                 searchStates.remove(chatId);
                 currentWindow.remove(chatId);
                 
@@ -782,11 +645,9 @@ public class AdminBot extends TelegramLongPollingBot {
                     String caption = update.getMessage().getCaption();
                     
                     // Сохраняем путь к фото в состояние для последующего заполнения формы
-                    ModerationState state = moderationStates.get(chatId);
-                    if (state == null) {
-                        state = new ModerationState(null, false);
-                        moderationStates.put(chatId, state);
-                    }
+                    ModerationState state = moderationStateService.getState(chatId);
+                    if (state == null)
+                        state = moderationStateService.createEmptyState(chatId);
                     state.setPhotoPath(newPath);
                     
                     // Парсим caption если он есть
@@ -809,7 +670,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 }
                 
                 // Для замены/установки фото
-                ModerationState state = moderationStates.get(chatId);
+                ModerationState state = moderationStateService.getState(chatId);
                 if (state == null || state.getApprovedKnifeId() == null) {
                     sendMessage(chatId, "❌ Состояние не найдено. Попробуйте снова.");
                     return;
@@ -826,7 +687,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 try (java.io.InputStream photoStream = new java.net.URL(fileUrl).openStream()) {
                     if (adminStep == com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_REPLACEMENT_PHOTO) {
-                        // Замена: переместить старое в app:/archive/replaced/, загрузить новое в app:/certificates/
                         String oldPath = knife.getPhotoPath();
                         if (oldPath != null && !oldPath.isEmpty()) {
                             String archivedFileName = "photo_" + timestamp + "_" + knifeId + ".jpg";
@@ -838,12 +698,8 @@ public class AdminBot extends TelegramLongPollingBot {
                                 logger.warning("Не удалось переместить старое фото в архив: " + e.getMessage());
                             }
                         }
-                        // Загружаем новое фото в app:/certificates/
-                        newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
-                    } else {
-                        // Установка: загрузить в app:/certificates/
-                        newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
                     }
+                    newPath = yandexDiskService.uploadToCertificates(photoStream, newFileName);
                 }
                 
                 // Обновляем photo_path в knives
@@ -855,8 +711,8 @@ public class AdminBot extends TelegramLongPollingBot {
                 
                 // Пересоздаём ModerationState с обновлённым ножом
                 Integer oldFormMessageId = state.getFormMessageId();
-                moderationStates.put(chatId, new ModerationState(knife, true));
-                ModerationState newState = moderationStates.get(chatId);
+                moderationStateService.initState(chatId, knife);
+                ModerationState newState = moderationStateService.getState(chatId);
                 newState.setFormMessageId(oldFormMessageId);
                 
                 sendApprovedSubmissionForm(chatId, knifeId);
@@ -891,7 +747,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Req 11.2: кнопка "Установить фото" для модели без фото.
      */
     private void handleApprovedPhotoRequest(Long chatId, Long knifeId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -939,7 +795,7 @@ public class AdminBot extends TelegramLongPollingBot {
     private void handleApprovedPhotoCancelRequest(Long chatId, Long knifeId) {
         adminPhotoSteps.remove(chatId);
         
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state != null && state.getPromptMessageId() != null) {
             deleteMessage(chatId, state.getPromptMessageId());
             state.setPromptMessageId(null);
@@ -1415,14 +1271,10 @@ public class AdminBot extends TelegramLongPollingBot {
      * Если изменения есть - показывает подтверждение, иначе - сразу открывает заявку.
      */
     private void handleViewSubmissionWithCheck(Long chatId, Long submissionId) {
-        ModerationState currentState = moderationStates.get(chatId);
+        ModerationState currentState = moderationStateService.getState(chatId);
         
         // Если есть текущее состояние и есть несохраненные изменения
         if (currentState != null && currentState.hasChanges()) {
-            // Сохраняем ID новой заявки для последующего открытия
-            currentState.setPendingSubmissionId(submissionId);
-            
-            // Показываем подтверждение
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
             message.setText("⚠️ У вас есть несохраненные изменения в текущей заявке.\n\n" +
@@ -1453,18 +1305,18 @@ public class AdminBot extends TelegramLongPollingBot {
     private void showSubmissionDetails(Long chatId, Long submissionId) {
         try {
             Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
-            if (!submissionOpt.isPresent()) {
+            if (submissionOpt.isEmpty()) {
                 sendMessage(chatId, "❌ Заявка не найдена");
                 return;
             }
-            
+
             SubmissionBuffer submission = submissionOpt.get();
-            
+
             // Создаем временную копию для редактирования
-            moderationStates.put(chatId, new ModerationState(submission));
-            
+            moderationStateService.createEmptyState(chatId);
+
             sendSubmissionForm(chatId, submissionId);
-            
+
         } catch (Exception e) {
             logger.severe("Ошибка при просмотре заявки: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при просмотре заявки");
@@ -1473,7 +1325,7 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void sendSubmissionForm(Long chatId, Long submissionId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние модерации не найдено");
                 return;
@@ -1634,7 +1486,7 @@ public class AdminBot extends TelegramLongPollingBot {
     private void showApprovedSubmissionDetails(Long chatId, Long submissionId) {
         try {
             // Проверяем, есть ли уже открытая форма
-            ModerationState existingState = moderationStates.get(chatId);
+            ModerationState existingState = moderationStateService.getState(chatId);
             if (existingState != null && existingState.getFormMessageId() != null)
                 deleteMessage(chatId, existingState.getFormMessageId());
             
@@ -1648,7 +1500,7 @@ public class AdminBot extends TelegramLongPollingBot {
             Knife knife = knifeOpt.get();
             
             // Создаем временную копию для редактирования с флагом isApprovedView
-            moderationStates.put(chatId, new ModerationState(knife, true));
+            moderationStateService.initState(chatId, knife);
             
             sendApprovedSubmissionForm(chatId, submissionId);
             
@@ -1660,7 +1512,7 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void sendApprovedSubmissionForm(Long chatId, Long submissionId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
@@ -1819,8 +1671,7 @@ public class AdminBot extends TelegramLongPollingBot {
             state.setPromptMessageId(null);
             
             // Сохраняем состояние для последующего редактирования
-            moderationStates.put(chatId, state);
-            
+            moderationStateService.setState(chatId, state);
         } catch (Exception e) {
             logger.severe("Ошибка при отправке формы добавления: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при создании формы добавления");
@@ -1828,7 +1679,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModEditField(Long chatId, Long submissionId, String field) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -1886,7 +1737,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModFieldInput(Long chatId, String text, Integer userMessageId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null || state.getEditingField() == null) {
             return;
         }
@@ -1910,7 +1761,6 @@ public class AdminBot extends TelegramLongPollingBot {
                 if (state.getAlternativeModels() == null) {
                     state.setAlternativeModels(new ArrayList<>());
                 }
-                // Требование 2.1–2.5: Используем AlternativesParser для парсинга множественных альтернатив
                 List<AlternativeEntry> parsedAlternatives = alternativesParser.parse(text);
                 for (AlternativeEntry entry : parsedAlternatives) {
                     String altStr = entry.brand() != null 
@@ -1935,7 +1785,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModAddAlternative(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -1970,7 +1820,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModRemoveAlternative(Long chatId, Long submissionId, int index) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null || state.getAlternativeModels() == null) {
             return;
         }
@@ -1982,7 +1832,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModCancelInput(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -1997,7 +1847,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModApprove(Long chatId, Long moderatorId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -2126,7 +1976,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Требование 8.3: создать связи в alternatives и продолжить одобрение.
      */
     private void handleAltConfirmYes(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -2146,7 +1996,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Обработчик отмены одобрения — [❌ Отмена].
      */
     private void handleAltConfirmNo(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -2163,7 +2013,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleDuplicatePhotoYes(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -2193,7 +2043,7 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionBufferService.rejectSubmission(submissionId);
             
             // Очищаем состояние
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             
             // Отправляем уведомление
             sendMessage(chatId, "✅ Фото ножа #" + duplicateKnifeId + " успешно обновлено!");
@@ -2209,7 +2059,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleDuplicatePhotoNo(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние модерации не найдено");
             return;
@@ -2270,7 +2120,7 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Нет транзитивных альтернатив — завершаем (Req 9.5)
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
             handlePendingCommand(chatId);
             
@@ -2316,7 +2166,7 @@ public class AdminBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             logger.severe("Error showing transitive alternatives proposal for pending: " + e.getMessage());
             // Если не удалось показать предложение — просто завершаем
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             handlePendingCommand(chatId);
         }
     }
@@ -2326,7 +2176,7 @@ public class AdminBot extends TelegramLongPollingBot {
      */
     private void handleTransitivePendingYes(Long chatId, Long knifeId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
@@ -2335,7 +2185,7 @@ public class AdminBot extends TelegramLongPollingBot {
             Set<Long> transitiveIds = state.getTransitiveAlternativeIds();
             if (transitiveIds == null || transitiveIds.isEmpty()) {
                 sendMessage(chatId, "❌ Транзитивные альтернативы не найдены");
-                moderationStates.remove(chatId);
+                moderationStateService.removeState(chatId);
                 handlePendingCommand(chatId);
                 return;
             }
@@ -2344,7 +2194,7 @@ public class AdminBot extends TelegramLongPollingBot {
             Optional<Knife> knifeOpt = knifeRepository.findById(knifeId);
             if (knifeOpt.isEmpty()) {
                 sendMessage(chatId, "❌ Нож не найден");
-                moderationStates.remove(chatId);
+                moderationStateService.removeState(chatId);
                 handlePendingCommand(chatId);
                 return;
             }
@@ -2366,7 +2216,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 deleteMessage(chatId, state.getTransitiveMessageId());
             }
             
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
             handlePendingCommand(chatId);
             
@@ -2381,14 +2231,14 @@ public class AdminBot extends TelegramLongPollingBot {
      */
     private void handleTransitivePendingNo(Long chatId, Long knifeId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             
             // Удаляем сообщение с предложением (Req 14.9)
             if (state != null && state.getTransitiveMessageId() != null) {
                 deleteMessage(chatId, state.getTransitiveMessageId());
             }
             
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Заявка одобрена!");
             handlePendingCommand(chatId);
             
@@ -2429,7 +2279,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModReject(Long chatId, Long moderatorId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         
         try {
             Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
@@ -2457,7 +2307,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 messages.clearOtherMessages();
             }
             // Очищаем состояние
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
             
@@ -2472,7 +2322,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModCancel(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -2505,7 +2355,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleModCancelConfirm(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         
         // Удаляем форму заявки
         if (state != null && state.getFormMessageId() != null)
@@ -2524,7 +2374,7 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // Очищаем состояние модерации (отменяем все изменения)
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
         
         // ИЗМЕНЕНИЕ: Вместо handlePendingCommand используем updatePendingListIfNeeded
         updatePendingListIfNeeded(chatId);
@@ -2544,7 +2394,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Обработчик подтверждения переключения на другую заявку (Да, закрыть текущую).
      */
     private void handleSwitchConfirmYes(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         
         if (state != null) {
             // Удаляем сообщение-подтверждение
@@ -2563,7 +2413,7 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Очищаем состояние
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
         }
         
         // Открываем новую заявку
@@ -2574,17 +2424,12 @@ public class AdminBot extends TelegramLongPollingBot {
      * Обработчик отмены переключения на другую заявку (Нет, остаться).
      */
     private void handleSwitchConfirmNo(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
-        
+        ModerationState state = moderationStateService.getState(chatId);
         if (state != null) {
-            // Удаляем сообщение-подтверждение
             if (state.getConfirmationMessageId() != null) {
                 deleteMessage(chatId, state.getConfirmationMessageId());
                 state.setConfirmationMessageId(null);
             }
-            
-            // Очищаем ID ожидающей заявки
-            state.setPendingSubmissionId(null);
         }
     }
     
@@ -2594,7 +2439,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * только если администратор внес изменения в форму модерации.
      */
     private void handleModSaveAndExit(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2642,7 +2487,7 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Очищаем состояние модерации
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             
             // Обновляем список ожидающих заявок
             updatePendingListIfNeeded(chatId);
@@ -2662,7 +2507,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Начинает редактирование поля в форме прямой загрузки.
      */
     private void handleUploadEditField(Long chatId, String field) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2693,7 +2538,7 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             Message sent = execute(message);
             state.setPromptMessageId(sent.getMessageId());
-            moderationStates.put(chatId, state);
+            moderationStateService.setState(chatId, state);
         } catch (Exception e) {
             logger.severe("Ошибка при запросе ввода: " + e.getMessage());
         }
@@ -2703,7 +2548,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Начинает редактирование альтернатив в форме прямой загрузки.
      */
     private void handleUploadEditAlt(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2726,7 +2571,7 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             Message sent = execute(message);
             state.setPromptMessageId(sent.getMessageId());
-            moderationStates.put(chatId, state);
+            moderationStateService.setState(chatId, state);
         } catch (Exception e) {
             logger.severe("Ошибка при запросе альтернатив: " + e.getMessage());
         }
@@ -2737,7 +2582,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Использует handleModFieldInput для обновления состояния.
      */
     private void handleUploadFieldInput(Long chatId, String text, Integer userMessageId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null || state.getEditingField() == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2754,7 +2599,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Сохраняет данные в submissions_buffer (Req 15.5).
      */
     private void handleUploadSave(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2773,7 +2618,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Формируем строку альтернатив
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
-                AlternativesParser parser = new AlternativesParserImpl(",");
                 List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
                     .map(alt -> {
                         String[] parts = alt.split(" / ");
@@ -2783,7 +2627,7 @@ public class AdminBot extends TelegramLongPollingBot {
                             return new AlternativeEntry(parts[0].trim(), null);
                         }
                     })
-                    .collect(java.util.stream.Collectors.toList());
+                    .toList();
                 String altStr = alternatives.stream()
                     .map(alt -> alt.brand() != null ? alt.brand() + "/" + alt.name() : alt.name())
                     .collect(java.util.stream.Collectors.joining(", "));
@@ -2797,7 +2641,7 @@ public class AdminBot extends TelegramLongPollingBot {
                     "Ожидает одобрения модератором.");
             
             // Очищаем состояние
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при сохранении: " + e.getMessage());
@@ -2809,7 +2653,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Добавляет сертификат напрямую в knives (Req 15.6, 15.7).
      */
     private void handleUploadAdd(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2828,7 +2672,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Обрабатываем альтернативы
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
-                AlternativesParser parser = new AlternativesParserImpl(",");
                 List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
                     .map(alt -> {
                         String[] parts = alt.split(" / ");
@@ -2838,7 +2681,7 @@ public class AdminBot extends TelegramLongPollingBot {
                             return new AlternativeEntry(parts[0].trim(), null);
                         }
                     })
-                    .collect(java.util.stream.Collectors.toList());
+                    .toList();
                 
                 for (AlternativeEntry altEntry : alternatives) {
                     Brand altBrand = brandRepository.findByName(altEntry.brand())
@@ -2872,7 +2715,7 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             // Очищаем состояние
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при добавлении: " + e.getMessage());
@@ -2884,7 +2727,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Запрашивает подтверждение закрытия формы (Req 15.8).
      */
     private void handleUploadCancelRequest(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2909,7 +2752,7 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             Message sent = execute(message);
             state.setPromptMessageId(sent.getMessageId());
-            moderationStates.put(chatId, state);
+            moderationStateService.setState(chatId, state);
         } catch (Exception e) {
             logger.severe("Ошибка при запросе подтвержден��я: " + e.getMessage());
         }
@@ -2919,7 +2762,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Подтверждает закрытие формы.
      */
     private void handleUploadCancelConfirm(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2932,7 +2775,7 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // Очищаем состояние
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
         
         sendMessage(chatId, "✅ Форма закрыта.");
     }
@@ -2941,7 +2784,7 @@ public class AdminBot extends TelegramLongPollingBot {
      * Отменяет закрытие формы.
      */
     private void handleUploadCancelNo(Long chatId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2958,7 +2801,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedSave(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
@@ -2984,7 +2827,7 @@ public class AdminBot extends TelegramLongPollingBot {
     
     private void handleApprovedSaveConfirm(Long chatId, Long submissionId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
@@ -3016,25 +2859,19 @@ public class AdminBot extends TelegramLongPollingBot {
             // Обрабатываем новые альтернативы
             Set<Long> newAlternativeIds = new HashSet<>();
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
-                AlternativesParser parser = new AlternativesParserImpl("/");
-                
                 for (String altStr : state.getAlternativeModels()) {
-                    List<AlternativeEntry> entries = parser.parse(altStr);
+                    List<AlternativeEntry> entries = alternativesParser.parse(altStr);
                     for (AlternativeEntry entry : entries) {
                         Brand altBrand = findOrCreateBrand(entry.brand());
                         KnifeModel altModel = findOrCreateKnifeModel(entry.name());
-                        
                         Optional<Knife> existingKnife = knifeRepository.findByModelAndBrand(altModel, altBrand);
                         Knife altKnife;
-                        
-                        if (existingKnife.isPresent()) {
+                        if (existingKnife.isPresent())
                             altKnife = existingKnife.get();
-                        } else {
+                         else {
                             altKnife = new Knife(altModel, altBrand, null, null);
                             altKnife = knifeRepository.save(altKnife);
                         }
-                        
-                        // Добавляем альтернативу если её ещё нет
                         if (!knife.getAlternatives().contains(altKnife)) {
                             knife.addAlternative(altKnife);
                             newAlternativeIds.add(altKnife.getId());
@@ -3064,7 +2901,7 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Если нет транзитивных альтернатив, просто завершаем
             sendMessage(chatId, "✅ Изменения сохранены!");
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
@@ -3075,7 +2912,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedSaveNo(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -3111,7 +2948,7 @@ public class AdminBot extends TelegramLongPollingBot {
             // TODO: Реализовать удаление сертификата из новой схемы
             sendMessage(chatId, "⚠️ Удаление сертификатов пока не реализовано в новой схеме");
             
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
@@ -3121,7 +2958,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedCancel(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -3151,7 +2988,7 @@ public class AdminBot extends TelegramLongPollingBot {
     }
     
     private void handleApprovedCancelConfirm(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         
         // Удаляем сообщение-подтверждение если есть
         if (state != null && state.getPromptMessageId() != null)
@@ -3162,11 +2999,11 @@ public class AdminBot extends TelegramLongPollingBot {
         if (state != null && state.getFormMessageId() != null)
             deleteMessage(chatId, state.getFormMessageId());
         
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
     }
     
     private void handleApprovedCancelNo(Long chatId, Long submissionId) {
-        ModerationState state = moderationStates.get(chatId);
+        ModerationState state = moderationStateService.getState(chatId);
         if (state == null) {
             return;
         }
@@ -3543,13 +3380,13 @@ public class AdminBot extends TelegramLongPollingBot {
         ChatMessages messages = chatMessages.get(chatId);
         if (messages == null) {
             // Если нет записей, просто очищаем состояния
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             searchStates.remove(chatId);
             return;
         }
         
         // Удаляем сообщения из ModerationState
-        ModerationState modState = moderationStates.get(chatId);
+        ModerationState modState = moderationStateService.getState(chatId);
         if (modState != null) {
             if (modState.getFormMessageId() != null) {
                 deleteMessage(chatId, modState.getFormMessageId());
@@ -3566,7 +3403,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Очищаем список и состояния
         messages.clearOtherMessages();
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
         searchStates.remove(chatId);
     }
     
@@ -3588,7 +3425,7 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // Удаляем сообщения из ModerationState
-        ModerationState modState = moderationStates.get(chatId);
+        ModerationState modState = moderationStateService.getState(chatId);
         if (modState != null) {
             if (modState.getFormMessageId() != null) {
                 logger.info("DEBUG: Deleting formMessageId: " + modState.getFormMessageId());
@@ -3608,7 +3445,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Очищаем список и состояния
         messages.clearOtherMessages();
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
         searchStates.remove(chatId);
         currentWindow.remove(chatId);
         logger.info("DEBUG: closeCurrentWindow completed");
@@ -3637,7 +3474,7 @@ public class AdminBot extends TelegramLongPollingBot {
         logger.info("DEBUG: Deleted " + deletedCount + " messages, cleared list");
         
         // Очищаем состояния
-        moderationStates.remove(chatId);
+        moderationStateService.removeState(chatId);
         searchStates.remove(chatId);
         currentWindow.remove(chatId);
     }
@@ -3661,7 +3498,7 @@ public class AdminBot extends TelegramLongPollingBot {
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
         message.setText("✏️ Введите новый знак разделителя для альтернативных моделей:\n\n" +
-                       "Текущий: \"" + alternativeSeparator + "\"\n\n" +
+                       "Текущий: \"" + settingsService.getAlternativeSeparator() + "\"\n\n" +
                        "Примеры: , (запятая), ; (точка с запятой), | (вертикальная черта)");
         
         try {
@@ -3691,16 +3528,16 @@ public class AdminBot extends TelegramLongPollingBot {
         }
         
         // Сохраняем новый разделитель
-        alternativeSeparator = separator.trim();
+        settingsService.setAlternativeSeparator(separator.trim());
         
-        sendMessage(chatId, "✅ Разделитель изменен на: \"" + alternativeSeparator + "\"");
+        sendMessage(chatId, "✅ Разделитель изменен на: \"" + settingsService.getAlternativeSeparator() + "\"");
         handleSettingsCommand(chatId);
     }
 
     private void handleSettingsCommand(Long chatId) {
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
-        message.setText("⚙️ Настройки\n\nТекущий разделитель альтернатив: \"" + alternativeSeparator + "\"");
+        message.setText("⚙️ Настройки\n\nТекущий разделитель альтернатив: \"" + settingsService.getAlternativeSeparator() + "\"");
         
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         keyboard.add(RowBuilder.getRow("✏️ Изменить знак разделителя", "settings_change_separator"));
@@ -3722,7 +3559,7 @@ public class AdminBot extends TelegramLongPollingBot {
      */
     private void handleTransitiveYes(Long chatId, Long knifeId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
@@ -3761,7 +3598,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 deleteMessage(chatId, state.getTransitiveMessageId());
             
             sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
@@ -3778,7 +3615,7 @@ public class AdminBot extends TelegramLongPollingBot {
      */
     private void handleTransitiveNo(Long chatId, Long knifeId) {
         try {
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state == null) {
                 sendMessage(chatId, "❌ Состояние не найдено");
                 return;
@@ -3789,7 +3626,7 @@ public class AdminBot extends TelegramLongPollingBot {
                     deleteMessage(chatId, state.getTransitiveMessageId());
             
             sendMessage(chatId, "✅ Изменения сохранены!");
-            moderationStates.remove(chatId);
+            moderationStateService.removeState(chatId);
             handleApprovedCommand(chatId, 0);
             
         } catch (Exception e) {
@@ -3834,7 +3671,7 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage.setReplyMarkup(new InlineKeyboardMarkup(List.of(row)));
             
             Message sent = execute(sendMessage);
-            ModerationState state = moderationStates.get(chatId);
+            ModerationState state = moderationStateService.getState(chatId);
             if (state != null)
                 state.setTransitiveMessageId(sent.getMessageId());
         } catch (Exception e) {
