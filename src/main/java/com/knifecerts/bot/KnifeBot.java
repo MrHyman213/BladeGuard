@@ -8,10 +8,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import com.knifecerts.dto.AlternativeEntry;
 import com.knifecerts.model.*;
 import com.knifecerts.repository.UserMainMenuRepository;
+import com.knifecerts.service.*;
+import com.knifecerts.util.RowBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -30,13 +34,6 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import com.knifecerts.repository.BrandRepository;
 import com.knifecerts.repository.KnifeModelRepository;
-import com.knifecerts.service.AlternativesParser;
-import com.knifecerts.service.CaptionParser;
-import com.knifecerts.service.ConversationStateManager;
-import com.knifecerts.service.KnifeService;
-import com.knifecerts.service.NavigationStackService;
-import com.knifecerts.service.SubmissionBufferService;
-import com.knifecerts.service.YandexDiskService;
 
 @Component("knifeBotRedesigned")
 public class KnifeBot extends TelegramLongPollingBot {
@@ -57,6 +54,9 @@ public class KnifeBot extends TelegramLongPollingBot {
     
     @Autowired
     private KnifeService knifeService;
+
+    @Autowired
+    private SettingsService settingsService;
     
     @Autowired
     private BrandRepository brandRepository;
@@ -67,9 +67,6 @@ public class KnifeBot extends TelegramLongPollingBot {
     @Autowired
     private UserMainMenuRepository userMainMenuRepository;
     
-    // Константа для разделителя альтернативных моделей
-    private static final String ALTERNATIVE_SEPARATOR = "/";
-
     @Autowired
     private ConversationStateManager conversationStateManager;
     
@@ -716,7 +713,7 @@ public class KnifeBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         
         if (!alternatives.isEmpty()) {
-            String separator = ALTERNATIVE_SEPARATOR;
+            String separator = settingsService.getAlternativeSeparator();
             List<InlineKeyboardButton> separatorRow = new ArrayList<>();
             separatorRow.add(InlineKeyboardButton.builder()
                 .text("──── " + separator + " Альтернативы " + separator + " ────")
@@ -1051,24 +1048,18 @@ public class KnifeBot extends TelegramLongPollingBot {
     private void handleUploadCertificate(Long userId, Long chatId) {
         try {
             ConversationState state = conversationStateManager.getState(userId);
-            if (state == null) {
+            if (state == null)
                 return;
-            }
-            
             deleteAllExceptMainMenu(userId, chatId);
-            
-            String separator = ALTERNATIVE_SEPARATOR;
-            SendMessage helpMessage = new SendMessage();
-            helpMessage.setChatId(chatId.toString());
-            helpMessage.setText("📤 Загрузка сертификата\n\n" +
-                "Отправьте фото сертификата.\n\n" +
-                "Вы можете:\n" +
-                "• Отправить только фото\n" +
-                "• Отправить фото с подписью в формате:\n" +
-                "  Бренд " + separator + " Название " + separator + " Индекс\n\n" +
-                "После загрузки вы сможете отредактировать все поля.");
-            
-            Message sent = execute(helpMessage);
+            String separator = settingsService.getAlternativeSeparator();
+            Message sent = sendMessage(chatId, "📤 Загрузка сертификата\n\n" +
+                    "Отправьте фото сертификата.\n\n" +
+                    "Вы можете:\n" +
+                    "• Отправить только фото\n" +
+                    "• Отправить фото с подписью в формате:\n" +
+                    "  Бренд " + separator + " Название " + separator + " Индекс\n\n" +
+                    "После загрузки вы сможете отредактировать все поля.");
+            assert sent != null;
             state.setPromptMessageId(sent.getMessageId());
             
             state.setCurrentStep(ConversationStep.WAITING_FOR_PHOTO);
@@ -1574,7 +1565,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             state.setPromptMessageId(null);
         }
         
-        String separator = ALTERNATIVE_SEPARATOR;
+        String separator = settingsService.getAlternativeSeparator();
         state.setCurrentStep(ConversationStep.FORM_WAITING_ALT);
         
         try {
@@ -1583,18 +1574,7 @@ public class KnifeBot extends TelegramLongPollingBot {
             message.setText("➕ Введите альтернативу в формате:\nБренд " + separator + " Название\n\n" +
                 "Можно ввести несколько через запятую:\nБренд1 " + separator + " Название1, Бренд2 " + separator + " Название2");
             
-            // Добавляем кнопку "Закрыть"
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            List<InlineKeyboardButton> row = new ArrayList<>();
-            row.add(InlineKeyboardButton.builder()
-                .text("❌ Закрыть")
-                .callbackData("form_cancel_input")
-                .build());
-            keyboard.add(row);
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
+            message.setReplyMarkup(new InlineKeyboardMarkup(List.of(RowBuilder.getRow("❌ Закрыть", "form_cancel_input"))));
             Message sent = execute(message);
             state.setPromptMessageId(sent.getMessageId());
         } catch (Exception e) {
@@ -1651,14 +1631,13 @@ public class KnifeBot extends TelegramLongPollingBot {
             // Добавляем альтернативы
             if (state.getAlternatives() != null) {
                 for (String altStr : state.getAlternatives()) {
-                    String[] parts = altStr.split(java.util.regex.Pattern.quote(ALTERNATIVE_SEPARATOR));
-                    if (parts.length >= 2) {
-                        String brandName = parts[0].trim();
-                        String modelName = parts[1].trim();
-                        submissionBufferService.addAlternativeToSubmission(submission.getId(), modelName, brandName);
-                    } else if (parts.length == 1) {
-                        String modelName = parts[0].trim();
-                        submissionBufferService.addAlternativeToSubmission(submission.getId(), modelName, null);
+                    List<AlternativeEntry> entries = alternativesParser.parse(altStr);
+                    for (AlternativeEntry entry : entries) {
+                        submissionBufferService.addAlternativeToSubmission(
+                                submission.getId(),
+                                entry.name(),
+                                entry.brand()
+                        );
                     }
                 }
             }

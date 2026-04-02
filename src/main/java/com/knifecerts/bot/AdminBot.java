@@ -306,8 +306,9 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.equals("menu_upload")) {
                 // Начинаем процесс прямой загрузки сертификата (Req 15.1)
                 adminPhotoSteps.put(chatId, com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO);
+                String sep = settingsService.getAlternativeSeparator();
                 sendMessage(chatId, "📤 Отправьте фото для прямой загрузки сертификата.\n\n" +
-                        "Формат: бренд/название/индекс или бренд/название или только название");
+                        "Формат: бренд" + sep + "название" + sep + "индекс или бренд" + sep + "название или только название");
             } else if (data.equals("menu_error_log")) {
                 handleErrorLog(chatId);
             } else if (data.equals("menu_settings")) {
@@ -1631,9 +1632,10 @@ public class AdminBot extends TelegramLongPollingBot {
             text.append("📝 Форма добавления сертификата\n\n");
             text.append("Фото загружено: ✅\n");
             text.append("Путь: ").append(state.getPhotoPath()).append("\n\n");
+            String sep = settingsService.getAlternativeSeparator();
             text.append("Отправьте данные в формате:\n");
-            text.append("`бренд/название/индекс` - для полного описания\n");
-            text.append("`бренд/название` - без индекса\n");
+            text.append("`бренд").append(sep).append("название").append(sep).append("индекс` - для полного описания\n");
+            text.append("`бренд").append(sep).append("название` - без индекса\n");
             text.append("`название` - только название модели\n\n");
             text.append("Или используйте кнопки для редактирования.");
             
@@ -1801,8 +1803,9 @@ public class AdminBot extends TelegramLongPollingBot {
         try {
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
-            message.setText("➕ Введите альтернативу в формате:\nБренд / Название\n\n" +
-                "Можно ввести несколько через запятую:\nБренд1 / Название1, Бренд2 / Название2");
+            String sep = settingsService.getAlternativeSeparator();
+            message.setText("➕ Введите альтернативу в формате:\nБренд " + sep + " Название\n\n" +
+                "Можно ввести несколько через запятую:\nБренд1 " + sep + " Название1, Бренд2 " + sep + " Название2");
             
             // Добавляем кнопку "Отмена"
             message.setReplyMarkup(new InlineKeyboardMarkup(
@@ -2373,10 +2376,8 @@ public class AdminBot extends TelegramLongPollingBot {
             messages.clearOtherMessages();
         }
         
-        // Очищаем состояние модерации (отменяем все изменения)
         moderationStateService.removeState(chatId);
         
-        // ИЗМЕНЕНИЕ: Вместо handlePendingCommand используем updatePendingListIfNeeded
         updatePendingListIfNeeded(chatId);
     }
     
@@ -2398,25 +2399,14 @@ public class AdminBot extends TelegramLongPollingBot {
         
         if (state != null) {
             // Удаляем сообщение-подтверждение
-            if (state.getConfirmationMessageId() != null) {
+            if (state.getConfirmationMessageId() != null)
                 deleteMessage(chatId, state.getConfirmationMessageId());
-            }
-            
-            // Удаляем форму текущей заявки
-            if (state.getFormMessageId() != null) {
+            if (state.getFormMessageId() != null)
                 deleteMessage(chatId, state.getFormMessageId());
-            }
-            
-            // Удаляем сообщение-запрос, если есть
-            if (state.getPromptMessageId() != null) {
+            if (state.getPromptMessageId() != null)
                 deleteMessage(chatId, state.getPromptMessageId());
-            }
-            
-            // Очищаем состояние
             moderationStateService.removeState(chatId);
         }
-        
-        // Открываем новую заявку
         showSubmissionDetails(chatId, submissionId);
     }
     
@@ -2563,9 +2553,10 @@ public class AdminBot extends TelegramLongPollingBot {
         // Запрашиваем ввод альтернатив
         SendMessage message = new SendMessage();
         message.setChatId(chatId.toString());
+        String sep = settingsService.getAlternativeSeparator();
         message.setText("✏️ Отправьте альтернативные модели через запятую:\n" +
-                "Формат: `название` или `бренд/название`\n" +
-                "Пример: `Модель1, Бренд2/Модель2`");
+                "Формат: `название` или `бренд" + sep + "название`\n" +
+                "Пример: `Модель1, Бренд2" + sep + "Модель2`");
         message.setParseMode("Markdown");
         
         try {
