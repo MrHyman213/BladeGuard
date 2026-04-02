@@ -1454,7 +1454,7 @@ public class KnifeBot extends TelegramLongPollingBot {
                     for (com.knifecerts.dto.AlternativeEntry entry : parsedAlternatives) {
                         // Требование 2.8: Нормализация пробелов - всегда "Бренд / Название"
                         String normalized = entry.brand() != null 
-                            ? entry.brand() + " / " + entry.name()
+                            ? entry.brand() + settingsService.getAlternativeSeparator() + entry.name()
                             : entry.name();
                         confirmationMsg.append("• ").append(normalized).append("\n");
                         state.getAlternatives().add(normalized);

@@ -1766,7 +1766,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 List<AlternativeEntry> parsedAlternatives = alternativesParser.parse(text);
                 for (AlternativeEntry entry : parsedAlternatives) {
                     String altStr = entry.brand() != null 
-                        ? entry.brand() + " / " + entry.name()
+                        ? entry.brand() + settingsService.getAlternativeSeparator() + entry.name()
                         : entry.name();
                     state.getAlternativeModels().add(altStr);
                 }
