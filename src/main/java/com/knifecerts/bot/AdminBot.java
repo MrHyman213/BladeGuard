@@ -357,9 +357,19 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Очищаем навигационный стек до уровня 0
                 navigationStackService.clearFrom(chatId, 1);
                 
-                // Проверяем, есть ли уже главное меню
+                // Проверяем, есть ли уже главное меню (в памяти или в БД)
                 ChatMessages messages = chatMessages.get(chatId);
-                if (messages == null || messages.getMainMenuMessageId() == null) {
+                Integer mainMenuId = messages != null ? messages.getMainMenuMessageId() : null;
+                if (mainMenuId == null) {
+                    UserMainMenu saved = userMainMenuRepository.findById(chatId).orElse(null);
+                    if (saved != null) {
+                        mainMenuId = saved.getMessageId();
+                        if (messages != null) {
+                            messages.setMainMenuMessageId(mainMenuId);
+                        }
+                    }
+                }
+                if (mainMenuId == null) {
                     sendMainMenu(chatId);
                 }
                 // Если главное меню уже есть - ничего не делаем
