@@ -66,7 +66,7 @@ public class ModerationState {
     }
 
     private String format(AlternativeEntry alt, String separator) {
-        return (alt.brand() != null ? alt.brand() + separator : "") + alt.name();
+        return (alt.brand() != null ? alt.brand() + " " + separator + " " : "") + alt.name();
     }
 
     public String getName() { return name; }

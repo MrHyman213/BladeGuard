@@ -304,7 +304,7 @@ public class AdminBot extends TelegramLongPollingBot {
             } else if (data.equals("menu_search")) {
                 handleAdminSearchRequest(chatId);
             } else if (data.equals("menu_upload")) {
-                // Начинаем процесс прямой загрузки сертификата (Req 15.1)
+                // Начинаем процесс прямой загрузки сертификата
                 adminPhotoSteps.put(chatId, com.knifecerts.model.ConversationStep.ADMIN_WAITING_FOR_UPLOAD_PHOTO);
                 String sep = settingsService.getAlternativeSeparator();
                 sendMessage(chatId, "📤 Отправьте фото для прямой загрузки сертификата.\n\n" +
@@ -371,12 +371,12 @@ public class AdminBot extends TelegramLongPollingBot {
                 handleViewSubmissionWithCheck(chatId, submissionId);
             } else if (data.startsWith("approve_")) {
                 Long submissionId = Long.parseLong(data.substring(8));
-                handleApproveCallback(chatId, moderatorId, submissionId);
-                toastMessage = "✅ Заявка одобрена";
+                handleApproveCallback(chatId, submissionId);
+                toastMessage = String.format("✅ Заявка %d одобрена", submissionId);
             } else if (data.startsWith("reject_")) {
                 Long submissionId = Long.parseLong(data.substring(7));
-                handleRejectCallback(chatId, moderatorId, submissionId);
-                toastMessage = "❌ Заявка отклонена";
+                handleRejectCallback(chatId, submissionId);
+                toastMessage = String.format("❌ Заявка %d отклонена", submissionId);
             } else if (data.startsWith("mod_edit_name_")) {
                 Long submissionId = Long.parseLong(data.substring(14));
                 handleModEditField(chatId, submissionId, "name");
@@ -549,11 +549,13 @@ public class AdminBot extends TelegramLongPollingBot {
             if (toastMessage != null) {
                 answer.setText(toastMessage);
                 answer.setShowAlert(false); // Toast notification, не popup
+                logger.info("Отправляю toast: " + toastMessage);
             }
             execute(answer);
-            
+
         } catch (Exception e) {
             logger.severe("Ошибка при обработке callback: " + e.getMessage());
+            e.printStackTrace();
             try {
                 AnswerCallbackQuery answer = new AnswerCallbackQuery();
                 answer.setCallbackQueryId(callbackQuery.getId());
@@ -566,34 +568,25 @@ public class AdminBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleApproveCallback(Long chatId, Long moderatorId, Long submissionId) {
+    private void handleApproveCallback(Long chatId, Long submissionId) {
         try {
-            Knife knife = submissionBufferService.approveSubmission(submissionId);
-
-            sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
+            submissionBufferService.approveSubmission(submissionId);
             moderationStateService.removeState(chatId);
-            sendMainMenu(chatId);
-            
         } catch (Exception e) {
             logger.severe("Ошибка при одобрении заявки: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при одобрении заявки: " + e.getMessage());
         }
     }
 
-    private void handleRejectCallback(Long chatId, Long moderatorId, Long submissionId) {
+    private void handleRejectCallback(Long chatId, Long submissionId) {
         try {
             Optional<SubmissionBuffer> submissionOpt = submissionBufferService.getSubmissionById(submissionId);
             if (submissionOpt.isEmpty()) {
                 sendMessage(chatId, "❌ Заявка #" + submissionId + " не найдена");
                 return;
             }
-            
             submissionBufferService.rejectSubmission(submissionId);
-            
-            sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
             moderationStateService.removeState(chatId);
-            sendMainMenu(chatId);
-            
         } catch (Exception e) {
             logger.severe("Ошибка при отклонении заявки: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при отклонении заявки: " + e.getMessage());
@@ -706,10 +699,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 // Обновляем photo_path в knives
                 knife.setPhotoPath(newPath);
                 knifeRepository.save(knife);
-                
-                // Обновляем форму сертификата
-                sendMessage(chatId, "✅ Фото обновлено: " + newPath);
-                
+
                 // Пересоздаём ModerationState с обновлённым ножом
                 Integer oldFormMessageId = state.getFormMessageId();
                 moderationStateService.initState(chatId, knife);
@@ -719,22 +709,7 @@ public class AdminBot extends TelegramLongPollingBot {
                 sendApprovedSubmissionForm(chatId, knifeId);
                 return;
             }
-            
-            // Старая логика для обычной загрузки фото (не для модерации)
-            GetFile getFileMethod = new GetFile();
-            getFileMethod.setFileId(photo.getFileId());
-            org.telegram.telegrambots.meta.api.objects.File file = execute(getFileMethod);
-            
-            String fileUrl = "https://api.telegram.org/file/bot" + botToken + "/" + file.getFilePath();
-            
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-            String fileName = "photo_" + timestamp + ".jpg";
-            
-            try (InputStream photoStream = new java.net.URL(fileUrl).openStream()) {
-                String path = yandexDiskService.uploadPhoto(photoStream, fileName);
-                sendMessage(chatId, "✅ Фото успешно загружено!\nПуть: " + path);
-            }
-            
+
         } catch (Exception e) {
             logger.severe("Error handling photo: " + e.getClass().getName() + " - " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при загрузке фото. Попробуйте еще раз.");
@@ -1410,19 +1385,16 @@ public class AdminBot extends TelegramLongPollingBot {
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
         // Блок 1: Кнопки полей (показывают текущие значения)
-        // Кнопка "Бренд"
         String brandText = state.getBrand() != null ?
             "🏷️ " + (state.getBrand().length() > 25 ? state.getBrand().substring(0, 22) + "..." : state.getBrand()) : 
             "🏷️ Бренд";
         keyboard.add(RowBuilder.getRow(brandText, "mod_edit_brand_" + submissionId));
         
-        // Кнопка "Название"
         String nameText = state.getName() != null ?
             "📝 " + (state.getName().length() > 25 ? state.getName().substring(0, 22) + "..." : state.getName()) : 
             "📝 Название";
         keyboard.add(RowBuilder.getRow(nameText, "mod_edit_name_" + submissionId));
         
-        // Кнопка "Индекс"
         String indexText = state.getIndexCode() != null ?
             "🔢 " + state.getIndexCode() : 
             "🔢 Индекс";
@@ -1432,8 +1404,7 @@ public class AdminBot extends TelegramLongPollingBot {
         
         // Получаем список альтернатив из базы данных для проверки наличия сертификата
         List<Knife> dbAlternatives = new ArrayList<>();
-        if (state.getOriginal() instanceof Knife) {
-            Knife knife = (Knife) state.getOriginal();
+        if (state.getOriginal() instanceof Knife knife) {
             dbAlternatives = knifeService.getAllAlternatives(knife.getId());
         }
         
@@ -1474,7 +1445,6 @@ public class AdminBot extends TelegramLongPollingBot {
         RowBuilder.addRow(actionRow, "❌ Отклонить", "mod_reject_" + submissionId);
         keyboard.add(actionRow);
         
-        // Кнопка "Сохранить и выйти" — только если есть изменения
         if (state.hasChanges())
             keyboard.add(RowBuilder.getRow("💾 Сохранить и выйти", "mod_save_exit_" + submissionId));
         
@@ -1628,57 +1598,99 @@ public class AdminBot extends TelegramLongPollingBot {
             if (state.getPromptMessageId() != null)
                 deleteMessage(chatId, state.getPromptMessageId());
 
-            // Формируем текст с инструкциями
-            StringBuilder text = new StringBuilder();
-            text.append("📝 Форма добавления сертификата\n\n");
-            text.append("Фото загружено: ✅\n");
-            text.append("Путь: ").append(state.getPhotoPath()).append("\n\n");
+            // Формируем caption для фото
+            StringBuilder caption = new StringBuilder();
+            caption.append("📝 Форма добавления сертификата\n\n");
+            caption.append("Путь: ").append(state.getPhotoPath()).append("\n\n");
             String sep = settingsService.getAlternativeSeparator();
-            text.append("Отправьте данные в формате:\n");
-            text.append("`бренд").append(sep).append("название").append(sep).append("индекс` - для полного описания\n");
-            text.append("`бренд").append(sep).append("название` - без индекса\n");
-            text.append("`название` - только название модели\n\n");
-            text.append("Или используйте кнопки для редактирования.");
-            
-            SendMessage message = new SendMessage();
-            message.setChatId(chatId.toString());
-            message.setText(text.toString());
-            message.setParseMode("Markdown");
-            
-            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            // Кнопки для редактирования
-            keyboard.add(RowBuilder.getRow("🏷️ Бренд: "
-                    + (state.getBrand() != null ? state.getBrand() : "не указан"), "upload_edit_brand"));
-            keyboard.add(RowBuilder.getRow("📝 Название: "
-                    + (state.getName() != null ? state.getName() : "не указано"), "upload_edit_name"));
-            keyboard.add(RowBuilder.getRow("🔢 Индекс: "
-                    + (state.getIndexCode() != null ? state.getIndexCode() : "не указан"), "upload_edit_index"));
-            keyboard.add(RowBuilder.getRow("🔄 Альтернативы: "
-                    + (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()
-                    ? state.getAlternativeModels().size() + " шт." : "нет"), "upload_edit_alt"));
-            
-            // Кнопки действий
-            List<InlineKeyboardButton> actionRow = new ArrayList<>();
-            RowBuilder.addRow(actionRow, "💾 Сохранить", "upload_save");
-            RowBuilder.addRow(actionRow, "✅ Добавить", "upload_add");
-            keyboard.add(actionRow);
-            keyboard.add(RowBuilder.getRow("❌ Закрыть", "upload_cancel"));
-            
-            markup.setKeyboard(keyboard);
-            message.setReplyMarkup(markup);
-            
-            Message sentMessage = execute(message);
+            caption.append("Отправьте данные в формате:\n");
+            caption.append("`бренд").append(sep).append("название").append(sep).append("индекс` - для полного описания\n");
+            caption.append("`бренд").append(sep).append("название` - без индекса\n");
+            caption.append("`название` - только название модели\n\n");
+            caption.append("Или используйте кнопки для редактирования.");
+
+            InlineKeyboardMarkup markup = buildUploadFormKeyboard(state);
+
+            // Если форма уже существует - редактируем caption
+            if (state.getFormMessageId() != null) {
+                try {
+                    org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption editCaption =
+                        new org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption();
+                    editCaption.setChatId(chatId.toString());
+                    editCaption.setMessageId(state.getFormMessageId());
+                    editCaption.setCaption(caption.toString());
+                    editCaption.setParseMode("Markdown");
+                    editCaption.setReplyMarkup(markup);
+                    execute(editCaption);
+                    return;
+                } catch (Exception e) {
+                    logger.warning("Не удалось отредактировать форму, отправляем новую: " + e.getMessage());
+                }
+            }
+
+            // Отправляем фото с caption
+            if (state.getPhotoPath() != null && !state.getPhotoPath().isEmpty()) {
+                try {
+                    String photoUrl = yandexDiskService.getDownloadUrl(state.getPhotoPath());
+
+                    SendPhoto sendPhoto = new SendPhoto();
+                    sendPhoto.setChatId(chatId.toString());
+                    sendPhoto.setPhoto(new InputFile(photoUrl));
+                    sendPhoto.setCaption(caption.toString());
+                    sendPhoto.setParseMode("Markdown");
+                    sendPhoto.setReplyMarkup(markup);
+
+                    Message sentMessage = execute(sendPhoto);
+                    state.setFormMessageId(sentMessage.getMessageId());
+                    state.setPromptMessageId(null);
+                    moderationStateService.setState(chatId, state);
+                    return;
+                } catch (Exception e) {
+                    logger.warning("Не удалось загрузить фото, отправляем текстовую форму: " + e.getMessage());
+                }
+            }
+
+            // Фоллбэк: текстовое сообщение если нет фото
+            SendMessage textMessage = new SendMessage();
+            textMessage.setChatId(chatId.toString());
+            textMessage.setText(caption.toString());
+            textMessage.setParseMode("Markdown");
+            textMessage.setReplyMarkup(markup);
+
+            Message sentMessage = execute(textMessage);
             state.setFormMessageId(sentMessage.getMessageId());
             state.setPromptMessageId(null);
-            
-            // Сохраняем состояние для последующего редактирования
             moderationStateService.setState(chatId, state);
         } catch (Exception e) {
             logger.severe("Ошибка при отправке формы добавления: " + e.getMessage());
             sendMessage(chatId, "❌ Ошибка при создании формы добавления");
         }
+    }
+
+    private InlineKeyboardMarkup buildUploadFormKeyboard(ModerationState state) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+
+        // Кнопки для редактирования
+        keyboard.add(RowBuilder.getRow("🏷️ Бренд: "
+                + (state.getBrand() != null ? state.getBrand() : "не указан"), "upload_edit_brand"));
+        keyboard.add(RowBuilder.getRow("📝 Название: "
+                + (state.getName() != null ? state.getName() : "не указано"), "upload_edit_name"));
+        keyboard.add(RowBuilder.getRow("🔢 Индекс: "
+                + (state.getIndexCode() != null ? state.getIndexCode() : "не указан"), "upload_edit_index"));
+        keyboard.add(RowBuilder.getRow("🔄 Альтернативы: "
+                + (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()
+                ? state.getAlternativeModels().size() + " шт." : "нет"), "upload_edit_alt"));
+
+        // Кнопки действий
+        List<InlineKeyboardButton> actionRow = new ArrayList<>();
+        RowBuilder.addRow(actionRow, "💾 Сохранить", "upload_save");
+        RowBuilder.addRow(actionRow, "✅ Добавить", "upload_add");
+        keyboard.add(actionRow);
+        keyboard.add(RowBuilder.getRow("❌ Закрыть", "upload_cancel"));
+
+        markup.setKeyboard(keyboard);
+        return markup;
     }
     
     private void handleModEditField(Long chatId, Long submissionId, String field) {
@@ -2053,7 +2065,7 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage(chatId, "✅ Фото ножа #" + duplicateKnifeId + " успешно обновлено!");
             
             // Возвращаемся к списку
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при замене фото: " + e.getMessage());
@@ -2101,7 +2113,7 @@ public class AdminBot extends TelegramLongPollingBot {
             if (state.getPromptMessageId() != null)
                 deleteMessage(chatId, state.getPromptMessageId());
 
-            // Ищем транзитивные альтернативы (Req 9.1–9.5)
+            // Ищем транзитивные альтернативы
             Set<Long> newAlternativeIds = knife.getAlternatives().stream()
                 .map(Knife::getId)
                 .collect(Collectors.toSet());
@@ -2117,16 +2129,16 @@ public class AdminBot extends TelegramLongPollingBot {
                         .map(Knife::getId)
                         .collect(Collectors.toSet()));
                     
-                    // Показываем предложение транзитивных альтернатив (Req 9.2)
+                    // Показываем предложение транзитивных альтернатив
                     showTransitiveAlternativesProposalForPending(chatId, knife.getId(), transitiveAlternatives, state);
                     return;
                 }
             }
             
-            // Нет транзитивных альтернатив — завершаем (Req 9.5)
+            // Нет транзитивных альтернатив — завершаем
             moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при одобрении: " + e.getMessage());
@@ -2171,7 +2183,7 @@ public class AdminBot extends TelegramLongPollingBot {
             logger.severe("Error showing transitive alternatives proposal for pending: " + e.getMessage());
             // Если не удалось показать предложение — просто завершаем
             moderationStateService.removeState(chatId);
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
         }
     }
     
@@ -2190,16 +2202,16 @@ public class AdminBot extends TelegramLongPollingBot {
             if (transitiveIds == null || transitiveIds.isEmpty()) {
                 sendMessage(chatId, "❌ Транзитивные альтернативы не найдены");
                 moderationStateService.removeState(chatId);
-                handlePendingCommand(chatId);
+                updatePendingListIfNeeded(chatId);
                 return;
             }
             
-            // Получаем нож и добавляем транзитивные альтернативы (Req 9.3)
+            // Получаем нож и добавляем транзитивные альтернативы
             Optional<Knife> knifeOpt = knifeRepository.findById(knifeId);
             if (knifeOpt.isEmpty()) {
                 sendMessage(chatId, "❌ Нож не найден");
                 moderationStateService.removeState(chatId);
-                handlePendingCommand(chatId);
+                updatePendingListIfNeeded(chatId);
                 return;
             }
             
@@ -2215,14 +2227,14 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             knifeRepository.save(knife);
             
-            // Удаляем сообщение с предложением (Req 14.9)
+            // Удаляем сообщение с предложением
             if (state.getTransitiveMessageId() != null) {
                 deleteMessage(chatId, state.getTransitiveMessageId());
             }
             
             moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Транзитивные альтернативы добавлены!");
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
             logger.severe("Error handling transitive pending yes: " + e.getMessage());
@@ -2244,7 +2256,7 @@ public class AdminBot extends TelegramLongPollingBot {
             
             moderationStateService.removeState(chatId);
             sendMessage(chatId, "✅ Заявка одобрена!");
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
             logger.severe("Error handling transitive pending no: " + e.getMessage());
@@ -2316,7 +2328,7 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
             
             // Возвращаемся к списку
-            handlePendingCommand(chatId);
+            updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
             logger.severe("Ошибка при отклонении заявки: " + e.getMessage());
@@ -2610,9 +2622,10 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Формируем строку альтернатив
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                String sep = settingsService.getAlternativeSeparator();
                 List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
                     .map(alt -> {
-                        String[] parts = alt.split(" / ");
+                        String[] parts = alt.split(" " + java.util.regex.Pattern.quote(sep) + " ");
                         if (parts.length == 2) {
                             return new AlternativeEntry(parts[1].trim(), parts[0].trim());
                         } else {
@@ -2621,7 +2634,7 @@ public class AdminBot extends TelegramLongPollingBot {
                     })
                     .toList();
                 String altStr = alternatives.stream()
-                    .map(alt -> alt.brand() != null ? alt.brand() + "/" + alt.name() : alt.name())
+                    .map(alt -> alt.brand() != null ? alt.brand() + sep + alt.name() : alt.name())
                     .collect(java.util.stream.Collectors.joining(", "));
                 submission.setAlternatives(altStr);
             }
@@ -2664,9 +2677,10 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Обрабатываем альтернативы
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
+                String sep = settingsService.getAlternativeSeparator();
                 List<AlternativeEntry> alternatives = state.getAlternativeModels().stream()
                     .map(alt -> {
-                        String[] parts = alt.split(" / ");
+                        String[] parts = alt.split(" " + java.util.regex.Pattern.quote(sep) + " ");
                         if (parts.length == 2) {
                             return new AlternativeEntry(parts[1].trim(), parts[0].trim());
                         } else {

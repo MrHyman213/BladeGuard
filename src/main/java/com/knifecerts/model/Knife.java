@@ -149,7 +149,7 @@ public class Knife implements Moderatable{
         if (alternatives == null || alternatives.isEmpty())
             return "";
         return alternatives.stream()
-                .map(alt -> alt.getBrand().getName() + separator + alt.getModel().getName())
+                .map(alt -> alt.getBrand().getName() + " " + separator + " " + alt.getModel().getName())
                 .collect(Collectors.joining(", "));
     }
 }
