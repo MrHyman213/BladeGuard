@@ -151,6 +151,6 @@ public class SubmissionBuffer implements Moderatable{
 
     @Override
     public String getAlternativesText(String separator) {
-        return getAlternatives();
+        return getAlternatives() != null ? getAlternatives() : "";
     }
 }

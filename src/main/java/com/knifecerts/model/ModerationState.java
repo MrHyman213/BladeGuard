@@ -56,13 +56,23 @@ public class ModerationState {
             return !name.isEmpty() || !brand.isEmpty() || !indexCode.isEmpty() || !alternativeModels.isEmpty();
         }
         String separator = settingsService.getAlternativeSeparator();
-        return !Objects.equals(original.getModelName(), name)
-                || !Objects.equals(original.getBrandName(), brand)
-                || !Objects.equals(original.getIndexValue(), indexCode)
-                || !Objects.equals(
-                original.getAlternativesText(separator),
-                String.join(", ", alternativeModels)
-        );
+        
+        String originalAltText = original.getAlternativesText(separator);
+        String currentAltText = String.join(", ", alternativeModels);
+        
+        boolean nameChanged = !Objects.equals(original.getModelName(), name);
+        boolean brandChanged = !Objects.equals(original.getBrandName(), brand);
+        boolean indexChanged = !Objects.equals(original.getIndexValue(), indexCode);
+        boolean altChanged = !Objects.equals(originalAltText, currentAltText);
+        
+        if (nameChanged || brandChanged || indexChanged || altChanged) {
+            System.out.println("[hasChanges] name: " + original.getModelName() + " -> " + name);
+            System.out.println("[hasChanges] brand: " + original.getBrandName() + " -> " + brand);
+            System.out.println("[hasChanges] index: " + original.getIndexValue() + " -> " + indexCode);
+            System.out.println("[hasChanges] alts: \"" + originalAltText + "\" -> \"" + currentAltText + "\"");
+        }
+        
+        return nameChanged || brandChanged || indexChanged || altChanged;
     }
 
     private String format(AlternativeEntry alt, String separator) {
