@@ -2152,7 +2152,6 @@ public class AdminBot extends TelegramLongPollingBot {
             
             // Нет транзитивных альтернатив — завершаем
             moderationStateService.removeState(chatId);
-            sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
             updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
@@ -2270,7 +2269,6 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             
             moderationStateService.removeState(chatId);
-            sendMessage(chatId, "✅ Заявка одобрена!");
             updatePendingListIfNeeded(chatId);
             
         } catch (Exception e) {
@@ -2339,8 +2337,6 @@ public class AdminBot extends TelegramLongPollingBot {
             }
             // Очищаем состояние
             moderationStateService.removeState(chatId);
-            
-            sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
             
             // Возвращаемся к списку
             updatePendingListIfNeeded(chatId);

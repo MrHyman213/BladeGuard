@@ -60,11 +60,15 @@ public class MainMenuUpdateService {
                 editMessage.setMessageId(userMenu.getMessageId());
                 editMessage.setText("**Blade Guardian**\n\nВыберите бренд:");
                 editMessage.setReplyMarkup(buildMainMenuKeyboard(0));
-                
+
                 knifeBot.execute(editMessage);
                 logger.info("Главное меню обновлено для chatId=" + userMenu.getChatId());
             } catch (TelegramApiException e) {
-                logger.warning("Не удалось обновить меню для chatId=" + userMenu.getChatId() + 
+                if (e.getMessage() != null && e.getMessage().contains("message is not modified")) {
+                    // Содержимое не изменилось — игнорируем
+                    continue;
+                }
+                logger.warning("Не удалось обновить меню для chatId=" + userMenu.getChatId() +
                               ": " + e.getMessage());
             }
         }

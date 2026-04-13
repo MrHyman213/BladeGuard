@@ -147,66 +147,33 @@ public class SubmissionBufferService {
         }
 
         SubmissionBuffer submission = submissionOpt.get();
-
-        // Шаг 1: Копируем фото из app:/offers/ в app:/certificates/
         String offersPath = submission.getPhotoPath();
-        String certificatesPath;
-        try {
-            certificatesPath = copyOfferToCertificates(offersPath);
-        } catch (IOException e) {
-            throw new RuntimeException("Не удалось скопировать фото в certificates: " + e.getMessage(), e);
-        }
 
-        // Создаем или находим бренд и модель
+        // Шаг 1: Создаем или находим бренд и модель
         BrandWithCreated brandResult = findOrCreateBrand(submission.getBrandName());
         KnifeModel model = findOrCreateKnifeModel(submission.getModelName());
 
-        // Шаг 2: Создаем запись в knives с НОВЫМ путём в app:/certificates/
-        // Компенсирующая операция: если шаг 2 или 3 упадёт — удалить скопированный файл
-        Knife knife;
-        try {
-            knife = new Knife(model, brandResult.brand, submission.getIndex(), certificatesPath);
-            knife = knifeRepository.save(knife);
-        } catch (Exception e) {
-            // Компенсация: удаляем скопированный файл из certificates
-            tryDeleteFile(certificatesPath);
-            throw new RuntimeException("Не удалось создать запись ножа в БД: " + e.getMessage(), e);
-        }
+        // Шаг 2: Создаем запись в knives (пока с offersPath)
+        Knife knife = new Knife(model, brandResult.brand, submission.getIndex(), offersPath);
+        knife = knifeRepository.save(knife);
 
-        // Шаг 3: Удаляем оригинал из app:/offers/
-        try {
-            yandexDiskService.deleteFile(offersPath);
-        } catch (IOException e) {
-            // Компенсация: удаляем скопированный файл из certificates
-            tryDeleteFile(certificatesPath);
-            throw new RuntimeException("Не удалось удалить оригинал из offers: " + e.getMessage(), e);
-        }
-
-        // Обрабатываем альтернативы из TEXT поля
+        // Обрабатываем альтернативы
         String alternativesStr = submission.getAlternatives();
         if (alternativesStr != null && !alternativesStr.isEmpty()) {
-            // Используем разделитель "/" для парсинга (AlternativesParser нормализует пробелы)
             AlternativesParser parser = new AlternativesParserImpl(settingsService);
             List<AlternativeEntry> alternatives = parser.parse(alternativesStr);
 
             for (AlternativeEntry altEntry : alternatives) {
-                // Пропускаем альтернативы без бренда и названия
-                if (altEntry.name() == null || altEntry.name().trim().isEmpty()) {
-                    continue;
-                }
-                
+                if (altEntry.name() == null || altEntry.name().trim().isEmpty()) continue;
+
                 BrandWithCreated altBrandResult = findOrCreateBrand(altEntry.brand());
                 KnifeModel altModel = findOrCreateKnifeModel(altEntry.name());
 
                 Optional<Knife> existingKnife = knifeRepository.findByModelAndBrand(altModel, altBrandResult.brand);
-                Knife alternativeKnife;
-
-                if (existingKnife.isPresent()) {
-                    alternativeKnife = existingKnife.get();
-                } else {
-                    alternativeKnife = new Knife(altModel, altBrandResult.brand, null, null);
-                    alternativeKnife = knifeRepository.save(alternativeKnife);
-                }
+                Knife alternativeKnife = existingKnife.orElseGet(() -> {
+                    Knife k = new Knife(altModel, altBrandResult.brand, null, null);
+                    return knifeRepository.save(k);
+                });
 
                 knife.addAlternative(alternativeKnife);
             }
@@ -214,12 +181,31 @@ public class SubmissionBufferService {
 
         knifeRepository.save(knife);
 
-        // Шаг 4: Удаляем заявку из буфера
+        // Шаг 3: Удаляем заявку из буфера
         submissionBufferRepository.delete(submission);
 
-        // Если был создан новый бренд, обновляем меню у всех пользователей (Req 6.1, 6.5, 6.6)
-        if (brandResult.created) {
-            mainMenuUpdateService.updateAllUserMenus();
+        // --- БД зафиксирована. Теперь файловые операции ---
+
+        // Шаг 4: Копируем фото из app:/offers/ в app:/certificates/
+        String certificatesPath;
+        try {
+            certificatesPath = copyOfferToCertificates(offersPath);
+        } catch (IOException e) {
+            // Фото останется в offers, но нож уже в БД
+            throw new RuntimeException("Не удалось скопировать фото в certificates: " + e.getMessage(), e);
+        }
+
+        // Шаг 5: Обновляем путь к фото в БД
+        knife.setPhotoPath(certificatesPath);
+        knifeRepository.save(knife);
+
+        // Шаг 6: Удаляем оригинал из app:/offers/
+        try {
+            yandexDiskService.deleteFile(offersPath);
+        } catch (IOException e) {
+            // Не критично — фото уже в certificates, путь обновлён
+            // Логгируем, но не падаем
+            System.err.println("Не удалось удалить оригинал из offers: " + offersPath);
         }
 
         return knife;
