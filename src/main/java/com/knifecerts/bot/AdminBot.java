@@ -988,6 +988,10 @@ public class AdminBot extends TelegramLongPollingBot {
                 execute(editMessage);
                 logger.info("Список ожидающих заявок обновлен (message ID: " + messages.getPendingListMessageId() + ")");
             } catch (org.telegram.telegrambots.meta.exceptions.TelegramApiException e) {
+                if (e.getMessage() != null && e.getMessage().contains("message is not modified")) {
+                    // Содержимое не изменилось — игнорируем, ничего делать не нужно
+                    return;
+                }
                 logger.warning("Не удалось отредактировать список, отправляем новый: " + e.getMessage());
                 handlePendingCommand(chatId);
             }
