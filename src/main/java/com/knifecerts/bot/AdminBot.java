@@ -569,9 +569,9 @@ public class AdminBot extends TelegramLongPollingBot {
     private void handleApproveCallback(Long chatId, Long moderatorId, Long submissionId) {
         try {
             Knife knife = submissionBufferService.approveSubmission(submissionId);
-            
+
             sendMessage(chatId, "✅ Заявка #" + submissionId + " одобрена!");
-            
+            moderationStateService.removeState(chatId);
             sendMainMenu(chatId);
             
         } catch (Exception e) {
@@ -591,7 +591,7 @@ public class AdminBot extends TelegramLongPollingBot {
             submissionBufferService.rejectSubmission(submissionId);
             
             sendMessage(chatId, "❌ Заявка #" + submissionId + " отклонена");
-            
+            moderationStateService.removeState(chatId);
             sendMainMenu(chatId);
             
         } catch (Exception e) {
@@ -841,35 +841,30 @@ public class AdminBot extends TelegramLongPollingBot {
             int endIndex = Math.min(startIndex + itemsPerPage, pendingSubmissions.size());
             
             List<SubmissionBuffer> pageItems = pendingSubmissions.subList(startIndex, endIndex);
-            
-            StringBuilder text = new StringBuilder();
-            text.append("📋 Ожидающие заявки\n\n");
-            text.append("Всего: ").append(pendingSubmissions.size()).append(" заявок\n");
-            text.append("Страница ").append(page + 1).append(" из ").append(totalPages);
+
+            String text = "📋 Ожидающие заявки\n\n" +
+                    "Всего: " + pendingSubmissions.size() + " заявок\n" +
+                    "Страница " + (page + 1) + " из " + totalPages;
             
             SendMessage message = new SendMessage();
             message.setChatId(chatId.toString());
-            message.setText(text.toString());
+            message.setText(text);
             
             InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
             List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
-            
-            // Кнопки с заявками (3 колонки, до 10 строк)
+
             List<InlineKeyboardButton> currentRow = new ArrayList<>();
-            for (int i = 0; i < pageItems.size(); i++) {
-                SubmissionBuffer sub = pageItems.get(i);
+            for (SubmissionBuffer sub : pageItems) {
                 String buttonText = sub.getDisplayName();
-                
-                // Обрезаем длинные названия
-                if (buttonText.length() > 15) {
+
+                if (buttonText.length() > 15)
                     buttonText = buttonText.substring(0, 12) + "...";
-                }
-                
+
                 currentRow.add(InlineKeyboardButton.builder()
-                    .text(buttonText)
-                    .callbackData("view_" + sub.getId())
-                    .build());
-                
+                        .text(buttonText)
+                        .callbackData("view_" + sub.getId())
+                        .build());
+
                 // Добавляем строку после 3 кнопок
                 if (currentRow.size() == 3) {
                     keyboard.add(currentRow);
@@ -1314,7 +1309,7 @@ public class AdminBot extends TelegramLongPollingBot {
             SubmissionBuffer submission = submissionOpt.get();
 
             // Создаем временную копию для редактирования
-            moderationStateService.createEmptyState(chatId);
+            moderationStateService.initState(chatId, submission);
 
             sendSubmissionForm(chatId, submissionId);
 
@@ -1331,10 +1326,16 @@ public class AdminBot extends TelegramLongPollingBot {
                 sendMessage(chatId, "❌ Состояние модерации не найдено");
                 return;
             }
-            
+
             SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
             DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
-            
+
+            if (submission == null) {
+                logger.severe("submission is null для chatId=" + chatId);
+                sendMessage(chatId, "❌ Ошибка: заявка не загружена");
+                return;
+            }
+
             // Минимальный caption с основной информацией
             StringBuilder caption = new StringBuilder();
             caption.append("📋 Заявка на добавление сертификата\n\n");
