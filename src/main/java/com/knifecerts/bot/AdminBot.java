@@ -905,6 +905,7 @@ public class AdminBot extends TelegramLongPollingBot {
     private void updatePendingListIfNeeded(Long chatId) {
         ChatMessages messages = chatMessages.get(chatId);
         if (messages == null || messages.getPendingListMessageId() == null) {
+            logger.info("Submission list is null");
             // Если нет сохраненного списка - отправляем новый
             handlePendingCommand(chatId);
             return;
