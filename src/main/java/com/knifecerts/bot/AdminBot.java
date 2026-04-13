@@ -1884,23 +1884,15 @@ public class AdminBot extends TelegramLongPollingBot {
             return;
         }
         
-        // Валидация перед одобрением
-        List<String> errors = new ArrayList<>();
-        
-        if (state.getName() == null || state.getName().trim().isEmpty()) {
-            errors.add("❌ Название модели не заполнено");
-        }
-        
-        if (state.getIndexCode() == null || state.getIndexCode().trim().isEmpty()) {
-            errors.add("❌ Индекс не заполнен");
-        }
-        
-        if (!errors.isEmpty()) {
+        // Валидация перед одобрением: нужно хотя бы одно из двух — имя ИЛИ индекс
+        boolean hasName = state.getName() != null && !state.getName().trim().isEmpty();
+        boolean hasIndex = state.getIndexCode() != null && !state.getIndexCode().trim().isEmpty();
+
+        if (!hasName && !hasIndex) {
             StringBuilder message = new StringBuilder();
             message.append("⚠️ Невозможно одобрить заявку:\n\n");
-            for (String error : errors)
-                message.append(error).append("\n");
-            message.append("\n📝 Заполните все обязательные поля.");
+            message.append("❌ Не заполнено название модели или индекс\n");
+            message.append("\n📝 Заполните хотя бы одно из полей.");
             sendMessage(chatId, message.toString());
             return;
         }
@@ -2674,13 +2666,26 @@ public class AdminBot extends TelegramLongPollingBot {
             sendMessage(chatId, "❌ Состояние не найдено");
             return;
         }
-        
+
+        // Валидация: нужно хотя бы одно из двух — имя ИЛИ индекс
+        boolean hasName = state.getName() != null && !state.getName().trim().isEmpty();
+        boolean hasIndex = state.getIndexCode() != null && !state.getIndexCode().trim().isEmpty();
+
+        if (!hasName && !hasIndex) {
+            sendMessage(chatId, "⚠️ Заполните хотя бы одно из полей: название модели или индекс.");
+            return;
+        }
+
         try {
             // Создаем или находим бренд и модель
-            Brand brand = brandRepository.findByName(state.getBrand())
-                .orElseGet(() -> brandRepository.save(new Brand(state.getBrand())));
-            KnifeModel model = knifeModelRepository.findByName(state.getName())
-                .orElseGet(() -> knifeModelRepository.save(new KnifeModel(state.getName())));
+            Brand brand = state.getBrand() != null && !state.getBrand().trim().isEmpty()
+                ? brandRepository.findByName(state.getBrand())
+                    .orElseGet(() -> brandRepository.save(new Brand(state.getBrand())))
+                : null;
+            KnifeModel model = hasName
+                ? knifeModelRepository.findByName(state.getName())
+                    .orElseGet(() -> knifeModelRepository.save(new KnifeModel(state.getName())))
+                : null;
             
             // Создаем запись в knives
             Knife knife = new Knife(model, brand, state.getIndexCode(), state.getPhotoPath());
