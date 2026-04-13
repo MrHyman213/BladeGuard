@@ -1901,12 +1901,12 @@ public class AdminBot extends TelegramLongPollingBot {
             // Применяем изменения к заявке
             SubmissionBuffer submission = (SubmissionBuffer) state.getOriginal();
 
-            // Обновляем поля заявки (теперь гарантированно не null)
-            submission.setModelName(state.getName().trim());
+            // Обновляем поля заявки
+            submission.setModelName(hasName ? state.getName().trim() : null);
             submission.setBrandName(state.getBrand() != null && !state.getBrand().trim().isEmpty()
                 ? state.getBrand().trim()
                 : null);
-            submission.setIndex(state.getIndexCode().trim());
+            submission.setIndex(hasIndex ? state.getIndexCode().trim() : null);
 
             // Обновляем альтернативы (теперь как TEXT поле)
             if (state.getAlternativeModels() != null && !state.getAlternativeModels().isEmpty()) {
